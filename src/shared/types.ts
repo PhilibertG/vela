@@ -55,6 +55,8 @@ export interface Settings {
   disabledExtensions: string[]
   searchUrl: string
   sleepAfterMinutes: number
+  /** Today tabs unused for this long are archived. 0 = never. */
+  archiveAfterHours: number
 }
 
 export interface State {
@@ -132,12 +134,29 @@ export type Action =
   | { type: 'open-command-bar'; mode: CommandBarMode }
   | { type: 'window'; command: 'minimize' | 'maximize' | 'close' }
   | { type: 'manage-extensions' }
-  | { type: 'open-settings' }
-  | { type: 'close-settings' }
+  | { type: 'open-panel'; panel: Panel }
+  | { type: 'close-panel' }
+  | { type: 'archive-restore'; id: string }
+  | { type: 'archive-remove'; id: string }
+  | { type: 'archive-clear' }
   | { type: 'update-settings'; settings: Partial<Settings> }
   | { type: 'extension-options'; id: string }
   | { type: 'extension-toggle'; id: string; enabled: boolean }
   | { type: 'extension-uninstall'; id: string }
+
+/** Full-size panels drawn by the interface in place of the pages. */
+export type Panel = 'settings' | 'archive'
+
+/** Today tab archived after a period without use. */
+export interface ArchivedTab {
+  id: string
+  url: string
+  title: string
+  favicon?: string
+  spaceId: string
+  spaceName: string
+  archivedAt: number
+}
 
 /** Installed extension, as shown in the settings panel. */
 export interface ExtensionInfo {
@@ -167,5 +186,6 @@ export type UiEvent =
   | { type: 'edit-space-name'; spaceId: string }
   | { type: 'edit-folder-name'; id: string }
   | { type: 'window-state'; maximized: boolean }
-  | { type: 'settings'; open: boolean }
+  | { type: 'panel'; panel: Panel | null }
+  | { type: 'archive-changed' }
   | { type: 'extensions-changed' }

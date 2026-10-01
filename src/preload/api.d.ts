@@ -1,4 +1,4 @@
-import type { Action, CommandBarMode, ExtensionInfo, OverlayAction, OverlayMessage, State, Suggestion, UiEvent } from '../shared/types'
+import type { Action, ArchivedTab, CommandBarMode, ExtensionInfo, OverlayAction, OverlayMessage, State, Suggestion, UiEvent } from '../shared/types'
 
 export interface VelaApi {
   getState(): Promise<State>
@@ -8,6 +8,7 @@ export interface VelaApi {
   uiReady(): void
   suggest(query: string, mode: CommandBarMode): Promise<Suggestion[]>
   getExtensions(): Promise<ExtensionInfo[]>
+  getArchive(): Promise<ArchivedTab[]>
   overlay(action: OverlayAction): void
   onOverlay(cb: (message: OverlayMessage) => void): void
 }

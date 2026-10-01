@@ -25,6 +25,13 @@
     { minutes: 60, label: '1 heure' },
     { minutes: 240, label: '4 heures' }
   ]
+  const ARCHIVE_CHOICES = [
+    { hours: 12, label: '12 heures' },
+    { hours: 24, label: '24 heures' },
+    { hours: 168, label: '7 jours' },
+    { hours: 720, label: '30 jours' },
+    { hours: 0, label: 'Jamais' }
+  ]
   const WEB_STORE_URL = 'https://chromewebstore.google.com/'
 
   let extensions = $state<ExtensionInfo[]>([])
@@ -36,12 +43,12 @@
   const knownEngine = $derived(SEARCH_ENGINES.some((e) => e.url === settings.searchUrl))
 </script>
 
-<svelte:window onkeydown={(e) => e.key === 'Escape' && send({ type: 'close-settings' })} />
+<svelte:window onkeydown={(e) => e.key === 'Escape' && send({ type: 'close-panel' })} />
 
 <div class="panel">
   <header>
     <h1>Réglages</h1>
-    <button class="close" title="Fermer (Échap)" onclick={() => send({ type: 'close-settings' })}><Icon name="close" /></button>
+    <button class="close" title="Fermer (Échap)" onclick={() => send({ type: 'close-panel' })}><Icon name="close" /></button>
   </header>
 
   <section>
@@ -93,6 +100,22 @@
       </select>
     </div>
     <p class="note">Un onglet en veille libère sa mémoire. Il se recharge quand vous y revenez.</p>
+  </section>
+
+  <section>
+    <h2>Archivage</h2>
+    <div class="row">
+      <span>Archiver un onglet du jour inutilisé depuis</span>
+      <select
+        value={settings.archiveAfterHours}
+        onchange={(e) => update({ archiveAfterHours: Number(e.currentTarget.value) })}
+      >
+        {#each ARCHIVE_CHOICES as choice (choice.hours)}
+          <option value={choice.hours}>{choice.label}</option>
+        {/each}
+      </select>
+    </div>
+    <p class="note">Les onglets épinglés et favoris ne sont jamais archivés. L'archive garde les onglets 30 jours.</p>
   </section>
 
   <section>

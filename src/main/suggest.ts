@@ -14,6 +14,7 @@ const COMMANDS: { id: string; title: string; keywords: string; shortcut?: string
   { id: 'reopen', title: 'Rouvrir le dernier onglet fermé', keywords: 'rouvrir fermé reopen', shortcut: 'Ctrl+Shift+T' },
   { id: 'devtools', title: 'Outils de développement', keywords: 'devtools inspecter console', shortcut: 'F12' },
   { id: 'perf', title: 'Performances de Vela', keywords: 'performances mémoire stats perf' },
+  { id: 'archive', title: 'Archive des onglets', keywords: 'archive archivés anciens onglets retrouver' },
   { id: 'settings', title: 'Réglages', keywords: 'réglages paramètres settings préférences options', shortcut: 'Ctrl+,' }
 ]
 

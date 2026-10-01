@@ -23,6 +23,7 @@ import type {
   Metrics,
   OverlayAction,
   OverlayMessage,
+  Panel,
   Settings,
   Space,
   State,
@@ -32,13 +33,14 @@ import type {
 } from '../shared/types'
 import { SIDEBAR_ANIMATION_MS, SPLIT_GAP, contentRect, easeOutCubic } from '../shared/layout'
 import { folderAndDescendants, pinnedHas, pinnedTabIds } from '../shared/folders'
-import { History, loadState, makeFolder, makeSpace, makeTab, saveNow, scheduleSave } from './state'
+import { Archive, History, loadState, makeFolder, makeSpace, makeTab, saveNow, scheduleSave } from './state'
 import { suggest, toUrl } from './suggest'
 
 const RADIUS = 10
 const FIND_BAR = { width: 360, height: 56 }
 const WEB_STORE_URL = 'https://chromewebstore.google.com/'
 const SLEEP_CHOICES = [5, 15, 30, 60, 240]
+const ARCHIVE_CHOICES = [0, 12, 24, 168, 720]
 
 interface DisabledExtension {
   name: string
@@ -68,6 +70,9 @@ function sanitizeSettings(patch: Partial<Settings>): Partial<Settings> {
   }
   if (typeof patch.sleepAfterMinutes === 'number' && SLEEP_CHOICES.includes(patch.sleepAfterMinutes)) {
     out.sleepAfterMinutes = patch.sleepAfterMinutes
+  }
+  if (typeof patch.archiveAfterHours === 'number' && ARCHIVE_CHOICES.includes(patch.archiveAfterHours)) {
+    out.archiveAfterHours = patch.archiveAfterHours
   }
   return out
 }
@@ -99,6 +104,7 @@ export class Shell {
   private readonly tabByWc = new Map<number, string>()
   private readonly state: State
   private readonly history = new History()
+  private readonly archive = new Archive()
   private readonly closed: ClosedTab[] = []
   private overlayState: OverlayState = 'hidden'
   private emitScheduled = false
@@ -106,7 +112,8 @@ export class Shell {
   private extensions: ElectronChromeExtensions | null = null
   /** Vrai pendant la fermeture : les pages détruites ne doivent pas être retirées de l'état. */
   private closing = false
-  private settingsOpen = false
+  /** Panel shown in place of the pages, if any. */
+  private panel: Panel | null = null
   /** 0 = sidebar hidden, 1 = shown. Animated between the two. */
   private sidebarReveal = 1
   private sidebarAnimation: NodeJS.Timeout | null = null
@@ -165,6 +172,7 @@ export class Shell {
       this.closing = true
       saveNow(this.state)
       this.history.flush()
+      this.archive.flush()
     })
     // Les extensions gardent des processus actifs : on quitte explicitement.
     this.win.on('closed', () => app.quit())
@@ -176,7 +184,10 @@ export class Shell {
     this.layout()
 
     // Met en veille les onglets inactifs pour libérer de la mémoire.
-    setInterval(() => this.sleepIdleTabs(), 60_000)
+    setInterval(() => {
+      this.sleepIdleTabs()
+      this.archiveIdleTabs()
+    }, 60_000)
   }
 
   // ---------------------------------------------------------------- Démarrage
@@ -189,6 +200,7 @@ export class Shell {
   onExtensionsReady(): void {
     this.extensionsReady = true
     this.unloadDisabledExtensions()
+    this.archiveIdleTabs()
     const space = this.activeSpace()
     if (!space.activeTabId) space.activeTabId = this.pinnedTabs(space)[0] ?? space.today[0] ?? null
     this.showActive()
@@ -210,6 +222,7 @@ export class Shell {
     )
     ipcMain.on('vela:overlay', (_e, action: OverlayAction) => this.handleOverlayAction(action))
     ipcMain.handle('vela:extensions', () => this.listExtensions())
+    ipcMain.handle('vela:archive', () => this.archive.all())
   }
 
   // ---------------------------------------------------------------- État
@@ -293,7 +306,7 @@ export class Shell {
 
     const rect = this.contentRect()
     // The settings panel is drawn by the interface, in place of the pages.
-    const visible = this.settingsOpen ? [] : this.visibleTabIds()
+    const visible = this.panel ? [] : this.visibleTabIds()
     const bounds = new Map<string, Electron.Rectangle>()
     if (visible.length === 2) {
       const ratio = this.activeSpace().split!.ratio
@@ -487,7 +500,7 @@ export class Shell {
 
   /** Crée les vues visibles, les place et donne le focus à l'onglet actif. */
   private showActive(): void {
-    if (this.settingsOpen) this.setSettingsOpen(false)
+    if (this.panel) this.setPanel(null)
     if (this.extensionsReady) {
       for (const id of this.visibleTabIds()) {
         this.ensureView(id)
@@ -937,7 +950,10 @@ export class Shell {
         void this.showMetrics()
         break
       case 'settings':
-        this.setSettingsOpen(true)
+        this.setPanel('settings')
+        break
+      case 'archive':
+        this.setPanel('archive')
         break
     }
   }
@@ -1101,14 +1117,70 @@ export class Shell {
 
   // ---------------------------------------------------------------- Settings
 
-  private setSettingsOpen(open: boolean): void {
-    if (this.settingsOpen === open) return
-    this.settingsOpen = open
-    if (open && this.overlayState !== 'hidden') this.hideOverlay()
+  private setPanel(panel: Panel | null): void {
+    if (this.panel === panel) return
+    this.panel = panel
+    if (panel && this.overlayState !== 'hidden') this.hideOverlay()
     this.layout()
-    this.sendUiEvent({ type: 'settings', open })
-    if (open) this.ui.webContents.focus()
-    else this.activeWebContents()?.focus()
+    this.sendUiEvent({ type: 'panel', panel })
+    const wc = this.activeWebContents()
+    if (!panel && wc) wc.focus()
+    else this.ui.webContents.focus()
+  }
+
+  // ---------------------------------------------------------------- Archive
+
+  /** Today tabs not used for the chosen delay leave the sidebar and go to the archive. */
+  private archiveIdleTabs(): void {
+    const hours = this.state.settings.archiveAfterHours
+    let changed = this.archive.prune()
+    if (hours > 0) {
+      const limit = Date.now() - hours * 3600_000
+      const visible = new Set(this.visibleTabIds())
+      for (const space of this.state.spaces) {
+        for (const id of [...space.today]) {
+          const tab = this.state.tabs[id]
+          if (!tab || tab.lastActive > limit || tab.audible || visible.has(id) || id === space.activeTabId) continue
+          if (space.split && (space.split.left === id || space.split.right === id)) continue
+          if (/^https?:/.test(tab.url)) {
+            this.archive.add({ url: tab.url, title: tab.title, favicon: tab.favicon, spaceId: space.id, spaceName: space.name })
+          }
+          this.destroyView(id)
+          space.today = space.today.filter((x) => x !== id)
+          delete this.state.tabs[id]
+          changed = true
+        }
+      }
+    }
+    if (changed) {
+      this.emit()
+      this.sendUiEvent({ type: 'archive-changed' })
+    }
+  }
+
+  private restoreArchived(id: string): void {
+    const entry = this.archive.take(id)
+    if (!entry) return
+    const space = this.state.spaces.find((s) => s.id === entry.spaceId)
+    if (space) this.state.activeSpaceId = space.id
+    this.newTab(entry.url)
+    this.sendUiEvent({ type: 'archive-changed' })
+  }
+
+  private async confirmClearArchive(): Promise<void> {
+    const count = this.archive.all().length
+    if (count === 0) return
+    const { response } = await dialog.showMessageBox(this.win, {
+      type: 'warning',
+      buttons: ["Vider l'archive", 'Annuler'],
+      defaultId: 1,
+      cancelId: 1,
+      message: `Supprimer les ${count} onglets archivés ?`,
+      detail: "L'historique de navigation n'est pas touché."
+    })
+    if (response !== 0) return
+    this.archive.clear()
+    this.sendUiEvent({ type: 'archive-changed' })
   }
 
   private listExtensions(): ExtensionInfo[] {
@@ -1325,11 +1397,21 @@ export class Shell {
       case 'manage-extensions':
         this.showExtensionsMenu()
         break
-      case 'open-settings':
-        this.setSettingsOpen(true)
+      case 'open-panel':
+        this.setPanel(action.panel)
         break
-      case 'close-settings':
-        this.setSettingsOpen(false)
+      case 'close-panel':
+        this.setPanel(null)
+        break
+      case 'archive-restore':
+        this.restoreArchived(action.id)
+        break
+      case 'archive-remove':
+        this.archive.remove(action.id)
+        this.sendUiEvent({ type: 'archive-changed' })
+        break
+      case 'archive-clear':
+        void this.confirmClearArchive()
         break
       case 'update-settings':
         Object.assign(this.state.settings, sanitizeSettings(action.settings))
@@ -1374,7 +1456,7 @@ export class Shell {
       else if (ctrl && !input.shift && key === 's') this.toggleSidebar()
       else if (ctrl && !input.shift && key === 'd') this.runCommand('pin')
       else if (ctrl && !input.shift && key === 'f') this.openFindBar()
-      else if (ctrl && !input.shift && key === ',') this.setSettingsOpen(!this.settingsOpen)
+      else if (ctrl && !input.shift && key === ',') this.setPanel(this.panel === 'settings' ? null : 'settings')
       else if (ctrl && key === 'tab') this.cycleTab(input.shift ? -1 : 1)
       // Physical key (code), not the character: on AZERTY the "1" key types "&" without Shift.
       else if (ctrl && /^(Digit|Numpad)[1-9]$/.test(input.code)) {

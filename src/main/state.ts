@@ -2,12 +2,15 @@ import { app } from 'electron'
 import { copyFileSync, existsSync, readFileSync, writeFileSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import type { Folder, HistoryEntry, Settings, Space, State, Tab } from '../shared/types'
+import type { ArchivedTab, Folder, HistoryEntry, Settings, Space, State, Tab } from '../shared/types'
 
 const STATE_FILE = 'vela-state.json'
 /** 1: before folders (no version field). 2: pinned section can hold folders. */
 const STATE_VERSION = 2
 const HISTORY_FILE = 'vela-history.json'
+const ARCHIVE_FILE = 'vela-archive.json'
+const ARCHIVE_KEEP_MS = 30 * 24 * 3600_000
+const ARCHIVE_LIMIT = 2000
 const HISTORY_LIMIT = 5000
 
 const SPACE_HUES = [215, 340, 145, 30, 270, 185, 0, 95]
@@ -18,7 +21,8 @@ export const DEFAULT_SETTINGS: Settings = {
   sidebarSide: 'left',
   disabledExtensions: [],
   searchUrl: 'https://www.google.com/search?q=%s',
-  sleepAfterMinutes: 15
+  sleepAfterMinutes: 15,
+  archiveAfterHours: 12
 }
 
 export function newId(): string {
@@ -157,6 +161,64 @@ export function saveNow(state: State): void {
   if (saveTimer) clearTimeout(saveTimer)
   saveTimer = null
   writeJson(STATE_FILE, state)
+}
+
+/** Archived today tabs, newest first. Kept 30 days, in their own file. */
+export class Archive {
+  private entries: ArchivedTab[] = []
+  private saveTimer: NodeJS.Timeout | null = null
+
+  constructor() {
+    const saved = readJson<ArchivedTab[]>(ARCHIVE_FILE)
+    if (Array.isArray(saved)) this.entries = saved.filter((e) => e && typeof e.url === 'string' && typeof e.id === 'string')
+    this.prune()
+  }
+
+  all(): ArchivedTab[] {
+    return this.entries
+  }
+
+  add(entry: Omit<ArchivedTab, 'id' | 'archivedAt'>): void {
+    this.entries.unshift({ ...entry, id: newId(), archivedAt: Date.now() })
+    this.prune()
+    this.scheduleSave()
+  }
+
+  take(id: string): ArchivedTab | undefined {
+    const entry = this.entries.find((e) => e.id === id)
+    if (entry) this.remove(id)
+    return entry
+  }
+
+  remove(id: string): void {
+    this.entries = this.entries.filter((e) => e.id !== id)
+    this.scheduleSave()
+  }
+
+  clear(): void {
+    this.entries = []
+    this.scheduleSave()
+  }
+
+  /** Drops entries older than 30 days, and the oldest beyond the size limit. */
+  prune(): boolean {
+    const before = this.entries.length
+    const limit = Date.now() - ARCHIVE_KEEP_MS
+    this.entries = this.entries.filter((e) => e.archivedAt >= limit).slice(0, ARCHIVE_LIMIT)
+    if (this.entries.length !== before) this.scheduleSave()
+    return this.entries.length !== before
+  }
+
+  private scheduleSave(): void {
+    if (this.saveTimer) return
+    this.saveTimer = setTimeout(() => this.flush(), 1000)
+  }
+
+  flush(): void {
+    if (this.saveTimer) clearTimeout(this.saveTimer)
+    this.saveTimer = null
+    writeJson(ARCHIVE_FILE, this.entries)
+  }
 }
 
 /** Historique de navigation, indexé par URL. */

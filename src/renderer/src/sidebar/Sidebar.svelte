@@ -1,7 +1,7 @@
 <script lang="ts">
   import { tick } from 'svelte'
   import { Tween } from 'svelte/motion'
-  import type { Action, Folder, Space, State, Tab } from '../../../shared/types'
+  import type { Action, Folder, Panel, Space, State, Tab } from '../../../shared/types'
   import { folderAndDescendants } from '../../../shared/folders'
   import {
     MARGIN,
@@ -14,6 +14,7 @@
   import Icon from '../lib/Icon.svelte'
   import Favicon from '../lib/Favicon.svelte'
   import SettingsPanel from './SettingsPanel.svelte'
+  import ArchivePanel from './ArchivePanel.svelte'
   import { hostOf } from '../lib/util'
 
   type ListName = 'favorites' | 'pinned' | 'today'
@@ -25,8 +26,9 @@
   let editingSpace = $state<string | null>(null)
   let editingFolder = $state<string | null>(null)
   let maximized = $state(false)
-  let settingsOpen = $state(false)
+  let panel = $state<Panel | null>(null)
   let extensionsVersion = $state(0)
+  let archiveVersion = $state(0)
   let winWidth = $state(window.innerWidth)
   let winHeight = $state(window.innerHeight)
 
@@ -54,8 +56,9 @@
     if (e.type === 'edit-space-name') editingSpace = e.spaceId
     if (e.type === 'edit-folder-name') editingFolder = e.id
     if (e.type === 'window-state') maximized = e.maximized
-    if (e.type === 'settings') settingsOpen = e.open
+    if (e.type === 'panel') panel = e.panel
     if (e.type === 'extensions-changed') extensionsVersion++
+    if (e.type === 'archive-changed') archiveVersion++
   })
 
   const space = $derived<Space | null>(
@@ -394,7 +397,8 @@
         <browser-action-list partition="persist:vela" alignment="bottom left"></browser-action-list>
       </div>
       <button title="Extensions" onclick={() => send({ type: 'manage-extensions' })}><Icon name="puzzle" size={15} /></button>
-      <button title="Réglages (Ctrl+,)" onclick={() => send({ type: 'open-settings' })}><Icon name="gear" size={15} /></button>
+      <button title="Archive" onclick={() => send({ type: 'open-panel', panel: 'archive' })}><Icon name="archive" size={15} /></button>
+      <button title="Réglages (Ctrl+,)" onclick={() => send({ type: 'open-panel', panel: 'settings' })}><Icon name="gear" size={15} /></button>
       <span class="sep"></span>
       <button title="Réduire" onclick={() => send({ type: 'window', command: 'minimize' })}><Icon name="minimize" size={14} /></button>
       <button title={maximized ? 'Restaurer' : 'Agrandir'} onclick={() => send({ type: 'window', command: 'maximize' })}><Icon name="maximize" size={13} /></button>
@@ -554,8 +558,10 @@
     style:width="{content.width}px"
     style:height="{content.height}px"
   >
-    {#if settingsOpen}
+    {#if panel === 'settings'}
       <SettingsPanel {settings} {extensionsVersion} />
+    {:else if panel === 'archive'}
+      <ArchivePanel {archiveVersion} />
     {:else if !activeTab}
       <div class="empty">
         <p class="empty-title">{space.name}</p>
@@ -568,7 +574,7 @@
     {/if}
   </div>
 
-  {#if splitShown && space.split && !settingsOpen}
+  {#if splitShown && space.split && !panel}
     <div
       class="split-handle"
       role="separator"
