@@ -1,6 +1,6 @@
 {
   "name": "vela",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Vela - navigateur Chromium avec barre latérale, Spaces et barre de commande",
   "main": "out/main/index.js",
