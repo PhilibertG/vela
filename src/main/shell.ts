@@ -494,6 +494,9 @@ export class Shell {
     if (wc) {
       if (this.overlayState !== 'command') wc.focus()
       this.extensions?.selectTab(wc)
+    } else if (this.overlayState !== 'command') {
+      // No page shown (empty Space): without this, the keyboard stays on a hidden page and shortcuts stop working.
+      this.ui.webContents.focus()
     }
     this.emit()
   }
