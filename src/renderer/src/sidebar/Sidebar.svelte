@@ -3,7 +3,7 @@
   import { Tween } from 'svelte/motion'
   import type { Action, Folder, Panel, Space, State, Tab } from '../../../shared/types'
   import { folderAndDescendants } from '../../../shared/folders'
-  import { SHARED_PARTITION, partitionOf } from '../../../shared/profiles'
+  import { SHARED_PARTITION, favoritesOf, partitionOf } from '../../../shared/profiles'
   import {
     MARGIN,
     SIDEBAR_ANIMATION_MS,
@@ -68,6 +68,8 @@
   const activeId = $derived(space?.activeTabId ?? null)
   const activeTab = $derived<Tab | null>(app && activeId ? (app.tabs[activeId] ?? null) : null)
   const settings = $derived(app?.settings)
+  // Favorites of the active Space's profile (its own list, or the shared one).
+  const favorites = $derived(app && space ? favoritesOf(app, space) : [])
   // Extension buttons belong to the profile of the active Space.
   const partition = $derived(space ? partitionOf(space) : SHARED_PARTITION)
   const splitShown = $derived(
@@ -123,7 +125,10 @@
   function listIds(list: ListName, spaceId?: string, folderId?: string | null): string[] {
     if (!app) return []
     if (list === 'pinned' && folderId) return app.folders[folderId]?.items ?? []
-    if (list === 'favorites') return app.favorites
+    if (list === 'favorites') {
+      const s = app.spaces.find((x) => x.id === (spaceId ?? app!.activeSpaceId))
+      return s ? favoritesOf(app, s) : app.favorites
+    }
     const s = app.spaces.find((x) => x.id === (spaceId ?? app!.activeSpaceId))
     return s ? s[list] : []
   }
@@ -423,13 +428,13 @@
     >
       <section
         class="favorites"
-        class:empty={app.favorites.length === 0}
+        class:empty={favorites.length === 0}
         class:drop-end={dropHint?.list === 'favorites' && dropHint.beforeId === null}
         role="list"
         ondragover={(e) => onDragOverList(e, 'favorites')}
         ondrop={onDrop}
       >
-        {#each tabsOf(app.favorites) as tab (tab.id)}
+        {#each tabsOf(favorites) as tab (tab.id)}
           <div
             class="fav"
             class:active={tab.id === activeId}
@@ -452,7 +457,7 @@
             <Favicon src={tab.favicon} url={tab.url} size={20} />
           </div>
         {/each}
-        {#if app.favorites.length === 0}
+        {#if favorites.length === 0}
           <span class="hint">Glissez un onglet ici pour l'ajouter aux favoris</span>
         {/if}
       </section>

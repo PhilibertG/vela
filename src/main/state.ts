@@ -5,8 +5,8 @@ import { randomUUID } from 'node:crypto'
 import type { ArchivedTab, Folder, HistoryEntry, Settings, Space, State, Tab } from '../shared/types'
 
 const STATE_FILE = 'vela-state.json'
-/** 1: before folders (no version field). 2: pinned section can hold folders. */
-const STATE_VERSION = 2
+/** 1: before folders (no version field). 2: pinned section can hold folders. 3: favorites per own-profile Space. */
+const STATE_VERSION = 3
 const HISTORY_FILE = 'vela-history.json'
 const ARCHIVE_FILE = 'vela-archive.json'
 const ARCHIVE_KEEP_MS = 30 * 24 * 3600_000
@@ -56,7 +56,8 @@ export function makeSpace(index: number, name?: string): Space {
     today: [],
     activeTabId: null,
     split: null,
-    profile: 'shared'
+    profile: 'shared',
+    favorites: []
   }
 }
 
@@ -140,6 +141,13 @@ export function loadState(): State {
   for (const space of state.spaces) {
     if (space.profile !== 'own') space.profile = 'shared'
     space.pinned = cleanTree(space.pinned)
+    space.favorites = Array.isArray(space.favorites) ? space.favorites.filter((id) => exists(id) && !placed.has(id)) : []
+    for (const id of space.favorites) placed.add(id)
+    // Own favorites of a Space that went back to the shared profile: kept as pinned tabs.
+    if (space.profile === 'shared' && space.favorites.length > 0) {
+      space.pinned.push(...space.favorites)
+      space.favorites = []
+    }
     space.today = space.today.filter(exists)
     if (space.activeTabId && !exists(space.activeTabId)) space.activeTabId = null
     if (space.split && !(exists(space.split.left) && exists(space.split.right))) space.split = null

@@ -36,6 +36,8 @@ export interface Space {
   split: Split | null
   /** 'own': cookies, logins and site data separate from the other Spaces. */
   profile: 'shared' | 'own'
+  /** Favorites of an own-profile Space. Shared-profile Spaces use State.favorites. */
+  favorites: string[]
 }
 
 /** Folder of the pinned section. Can hold tabs and other folders. */

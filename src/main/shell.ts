@@ -36,7 +36,7 @@ import type {
 } from '../shared/types'
 import { SIDEBAR_ANIMATION_MS, SPLIT_GAP, contentRect, easeOutCubic } from '../shared/layout'
 import { folderAndDescendants, pinnedHas, pinnedTabIds } from '../shared/folders'
-import { SHARED_PARTITION, partitionOf } from '../shared/profiles'
+import { SHARED_PARTITION, favoritesOf, partitionOf } from '../shared/profiles'
 import { Archive, History, loadState, makeFolder, makeSpace, makeTab, saveNow, scheduleSave } from './state'
 import { suggest, toUrl } from './suggest'
 
@@ -266,11 +266,18 @@ export class Shell {
 
   /** Space holding this tab (pinned, in any folder, or today) or this folder. */
   private spaceOf(id: string): Space | undefined {
-    return this.state.spaces.find((s) => s.today.includes(id) || pinnedHas(this.state.folders, s, id))
+    return this.state.spaces.find(
+      (s) => s.today.includes(id) || s.favorites.includes(id) || pinnedHas(this.state.folders, s, id)
+    )
   }
 
   private isKept(tabId: string): boolean {
-    return this.state.favorites.includes(tabId) || this.state.spaces.some((s) => pinnedHas(this.state.folders, s, tabId))
+    return this.isFavorite(tabId) || this.state.spaces.some((s) => pinnedHas(this.state.folders, s, tabId))
+  }
+
+  /** In the shared favorites or in the favorites of an own-profile Space. */
+  private isFavorite(tabId: string): boolean {
+    return this.state.favorites.includes(tabId) || this.state.spaces.some((s) => s.favorites.includes(tabId))
   }
 
   /** Removes a tab or folder id from the pinned tree of every Space. */
@@ -597,7 +604,7 @@ export class Shell {
 
   /** Liste des onglets de l'espace dans l'ordre d'affichage de la barre latérale. */
   private orderedTabs(space: Space): string[] {
-    return [...this.state.favorites, ...this.pinnedTabs(space), ...space.today]
+    return [...favoritesOf(this.state, space), ...this.pinnedTabs(space), ...space.today]
   }
 
   private neighbourOf(tabId: string, space: Space): string | null {
@@ -693,12 +700,19 @@ export class Shell {
     const folder = to === 'pinned' && folderId ? this.state.folders[folderId] : undefined
     this.state.favorites = this.state.favorites.filter((id) => id !== tabId)
     this.detachPinned(tabId)
-    for (const s of this.state.spaces) s.today = s.today.filter((id) => id !== tabId)
+    for (const s of this.state.spaces) {
+      s.today = s.today.filter((id) => id !== tabId)
+      s.favorites = s.favorites.filter((id) => id !== tabId)
+    }
     // A folder belongs to one Space: dropping into it moves the tab to that Space.
     const target =
       (folder && this.spaceOf(folder.id)) ?? this.state.spaces.find((s) => s.id === spaceId) ?? this.activeSpace()
     const list =
-      to === 'favorites' ? this.state.favorites : to === 'pinned' ? (folder?.items ?? target.pinned) : target.today
+      to === 'favorites'
+        ? favoritesOf(this.state, target)
+        : to === 'pinned'
+          ? (folder?.items ?? target.pinned)
+          : target.today
     list.splice(Math.max(0, Math.min(index, list.length)), 0, tabId)
 
     if (to === 'today') tab.homeUrl = undefined
@@ -852,7 +866,7 @@ export class Shell {
     if (this.state.spaces.length <= 1) return
     const space = this.state.spaces.find((s) => s.id === spaceId)
     if (!space) return
-    const tabIds = [...this.pinnedTabs(space), ...space.today]
+    const tabIds = [...space.favorites, ...this.pinnedTabs(space), ...space.today]
     const count = tabIds.length
     // Own profile data stays on disk after a switch back to the shared profile: it goes with the Space.
     const ownPartition = partitionOf({ id: space.id, profile: 'own' })
@@ -1133,13 +1147,19 @@ export class Shell {
     const tab = this.state.tabs[tabId]
     if (!tab) return
     const space = this.spaceOf(tabId)
-    const isFavorite = this.state.favorites.includes(tabId)
+    const isFavorite = this.isFavorite(tabId)
     const isPinned = !!space && pinnedHas(this.state.folders, space, tabId)
     const others = this.state.spaces.filter((s) => s !== space)
     const items: MenuItemConstructorOptions[] = [
       isFavorite
-        ? { label: 'Retirer des favoris', click: () => this.moveTab(tabId, 'pinned', 0) }
-        : { label: 'Ajouter aux favoris', click: () => this.moveTab(tabId, 'favorites', this.state.favorites.length) },
+        ? { label: 'Retirer des favoris', click: () => this.moveTab(tabId, 'pinned', 0, space?.id) }
+        : {
+            label: 'Ajouter aux favoris',
+            click: () => {
+              const target = space ?? this.activeSpace()
+              this.moveTab(tabId, 'favorites', favoritesOf(this.state, target).length, target.id)
+            }
+          },
       { label: isPinned ? 'Désépingler' : 'Épingler', visible: !isFavorite, click: () => this.togglePin(tabId) },
       { label: "Revenir à l'URL d'origine", visible: !!tab.homeUrl && tab.homeUrl !== tab.url, click: () => this.resetTab(tabId) },
       { type: 'separator' },
@@ -1281,11 +1301,18 @@ export class Shell {
           : `Faire revenir « ${space.name} » au profil commun ?`,
       detail:
         profile === 'own'
-          ? 'Ses onglets se rechargent sans les connexions actuelles : il faudra vous reconnecter aux sites dans cet espace. Les extensions restent disponibles.'
-          : "Ses onglets se rechargent avec les connexions du profil commun. Les données du profil propre restent sur l'ordinateur et reviennent si vous le réactivez."
+          ? 'Ses onglets se rechargent sans les connexions actuelles : il faudra vous reconnecter aux sites dans cet espace. Il aura sa propre liste de favoris, vide au départ. Les extensions restent disponibles.'
+          : "Ses onglets se rechargent avec les connexions du profil commun. Ses favoris propres deviennent des onglets épinglés de cet espace. Les données du profil propre restent sur l'ordinateur et reviennent si vous le réactivez."
     })
     if (response !== 0) return
     space.profile = profile
+    if (profile === 'shared') {
+      // Its own favorites become pinned tabs of the Space: nothing is lost.
+      space.pinned.push(...space.favorites)
+      space.favorites = []
+    } else {
+      space.favorites = []
+    }
     this.refreshTabSessions([...this.pinnedTabs(space), ...space.today])
     this.emit()
   }

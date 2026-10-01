@@ -100,7 +100,9 @@ export function suggest(query: string, mode: CommandBarMode, state: State, histo
     .sort((a, b) => b.s - a.s || b.tab.lastActive - a.tab.lastActive)
     .slice(0, 4)
   for (const { tab } of tabMatches) {
-    const space = state.spaces.find((s) => s.today.includes(tab.id) || pinnedHas(state.folders, s, tab.id))
+    const space = state.spaces.find(
+      (s) => s.today.includes(tab.id) || s.favorites.includes(tab.id) || pinnedHas(state.folders, s, tab.id)
+    )
     results.push({
       kind: 'tab',
       title: tab.title,
