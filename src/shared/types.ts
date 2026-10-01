@@ -174,12 +174,17 @@ export type OverlayAction =
   | { type: 'close' }
   | { type: 'painted'; openedAt: number }
   | { type: 'find'; text: string; forward: boolean; findNext: boolean }
+  | { type: 'peek-close' }
+  | { type: 'peek-expand' }
 
 /** Messages envoyés par le processus principal à la vue superposée. */
 export type OverlayMessage =
   | { type: 'command-bar'; open: CommandBarOpen; openedAt: number }
   | { type: 'find-bar'; openedAt: number }
   | { type: 'find-result'; active: number; matches: number }
+  /** rect: where the Peek page sits, in window coordinates. */
+  | { type: 'peek'; rect: { x: number; y: number; width: number; height: number }; url: string; title: string }
+  | { type: 'peek-info'; url: string; title: string }
 
 /** Messages ponctuels envoyés à la barre latérale. */
 export type UiEvent =

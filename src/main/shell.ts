@@ -82,7 +82,18 @@ interface ClosedTab {
   spaceId: string
 }
 
-type OverlayState = 'hidden' | 'command' | 'find'
+type OverlayState = 'hidden' | 'command' | 'find' | 'peek'
+
+/** Approximate site of a URL: last two labels of the host (three for co.uk-like endings). */
+function siteOf(url: string): string {
+  try {
+    const labels = new URL(url).hostname.split('.')
+    const n = labels.length > 2 && labels[labels.length - 2].length <= 3 && labels[labels.length - 1].length === 2 ? 3 : 2
+    return labels.slice(-n).join('.')
+  } catch {
+    return ''
+  }
+}
 
 function rendererUrl(page: 'index' | 'overlay'): { url?: string; file?: string } {
   const dev = process.env['ELECTRON_RENDERER_URL']
@@ -107,6 +118,8 @@ export class Shell {
   private readonly archive = new Archive()
   private readonly closed: ClosedTab[] = []
   private overlayState: OverlayState = 'hidden'
+  /** Page shown in Peek, above the dimmed tabs. */
+  private peekView: WebContentsView | null = null
   private emitScheduled = false
   private extensionsReady = false
   private extensions: ElectronChromeExtensions | null = null
@@ -223,6 +236,10 @@ export class Shell {
     ipcMain.on('vela:overlay', (_e, action: OverlayAction) => this.handleOverlayAction(action))
     ipcMain.handle('vela:extensions', () => this.listExtensions())
     ipcMain.handle('vela:archive', () => this.archive.all())
+    // Link clicks reported by the tab preload. Synchronous: the page must know right away whether to follow the link.
+    ipcMain.on('vela:link-click', (e, url: unknown, shift: unknown) => {
+      e.returnValue = this.handleLinkClick(e.sender, url, shift === true)
+    })
   }
 
   // ---------------------------------------------------------------- État
@@ -331,8 +348,14 @@ export class Shell {
       }
     }
 
-    if (this.overlayState === 'command') {
+    if (this.overlayState === 'command' || this.overlayState === 'peek') {
       this.overlay.setBounds({ x: 0, y: 0, width, height })
+      if (this.peekView) {
+        const peekRect = this.peekRect()
+        this.peekView.setBounds(peekRect)
+        const wc = this.peekView.webContents
+        if (wc.getURL()) this.sendOverlay({ type: 'peek', rect: peekRect, url: wc.getURL(), title: wc.getTitle() })
+      }
     } else if (this.overlayState === 'find') {
       this.overlay.setBounds({
         x: rect.x + rect.width - FIND_BAR.width - 12,
@@ -359,6 +382,7 @@ export class Shell {
     this.win.contentView.addChildView(view)
     // La vue superposée doit rester au-dessus des onglets.
     this.win.contentView.addChildView(this.overlay)
+    if (this.peekView) this.win.contentView.addChildView(this.peekView)
 
     const wc = view.webContents
     this.views.set(tabId, view)
@@ -501,6 +525,7 @@ export class Shell {
   /** Crée les vues visibles, les place et donne le focus à l'onglet actif. */
   private showActive(): void {
     if (this.panel) this.setPanel(null)
+    if (this.overlayState === 'peek') this.hideOverlay()
     if (this.extensionsReady) {
       for (const id of this.visibleTabIds()) {
         this.ensureView(id)
@@ -836,6 +861,7 @@ export class Shell {
   // ---------------------------------------------------------------- Barre de commande et recherche
 
   openCommandBar(mode: CommandBarMode): void {
+    if (this.overlayState === 'peek') this.closePeek()
     const openedAt = Date.now()
     const tab = this.activeTabId() ? this.state.tabs[this.activeTabId()!] : null
     const initial = mode === 'edit-url' && tab ? tab.url : ''
@@ -847,6 +873,7 @@ export class Shell {
   }
 
   openFindBar(): void {
+    if (this.overlayState === 'peek') return
     if (!this.activeWebContents()) return
     this.overlayState = 'find'
     this.layout()
@@ -857,6 +884,7 @@ export class Shell {
 
   private hideOverlay(): void {
     if (this.overlayState === 'find') this.activeWebContents()?.stopFindInPage('clearSelection')
+    if (this.overlayState === 'peek') this.closePeek()
     this.overlayState = 'hidden'
     this.overlay.setVisible(false)
     const wc = this.activeWebContents()
@@ -867,8 +895,15 @@ export class Shell {
   private handleOverlayAction(action: OverlayAction): void {
     switch (action.type) {
       case 'close':
+      case 'peek-close':
         this.hideOverlay()
         break
+      case 'peek-expand': {
+        const url = this.peekView?.webContents.getURL()
+        this.hideOverlay()
+        if (url) this.newTab(url)
+        break
+      }
       case 'painted': {
         const ms = Date.now() - action.openedAt
         this.metrics.commandBarMs.push(ms)
@@ -1014,6 +1049,7 @@ export class Shell {
           label: 'Ouvrir le lien en vue partagée',
           click: () => this.openSplit(this.newTab(params.linkURL, { background: true }))
         },
+        { label: 'Ouvrir dans Peek (Maj+clic)', click: () => this.openPeek(params.linkURL) },
         { label: "Copier l'adresse du lien", click: () => clipboard.writeText(params.linkURL) },
         { type: 'separator' }
       )
@@ -1126,6 +1162,77 @@ export class Shell {
     const wc = this.activeWebContents()
     if (!panel && wc) wc.focus()
     else this.ui.webContents.focus()
+  }
+
+  // ---------------------------------------------------------------- Peek
+
+  /**
+   * Shift+click on any link, or a click from a pinned tab or favorite to another site, opens Peek.
+   * Returns true when the page must not follow the link itself.
+   */
+  private handleLinkClick(sender: WebContents, url: unknown, shift: boolean): boolean {
+    if (typeof url !== 'string' || !/^https?:\/\//i.test(url)) return false
+    const tabId = this.tabByWc.get(sender.id)
+    if (!tabId) return false // Peek's own page and other views follow links normally.
+    const toOtherSite = siteOf(url) !== siteOf(sender.getURL())
+    if (!shift && !(this.isKept(tabId) && toOtherSite)) return false
+    setImmediate(() => this.openPeek(url))
+    return true
+  }
+
+  /** Peek page area: inside the page area, leaving room above for its toolbar. */
+  private peekRect(): Electron.Rectangle {
+    const rect = this.contentRect()
+    const side = Math.max(32, Math.round((rect.width - 1200) / 2))
+    return {
+      x: rect.x + side,
+      y: rect.y + 52,
+      width: Math.max(200, rect.width - 2 * side),
+      height: Math.max(200, rect.height - 52 - 24)
+    }
+  }
+
+  private openPeek(url: string): void {
+    if (!/^https?:\/\//i.test(url)) return
+    if (this.panel) this.setPanel(null)
+    if (this.overlayState === 'command' || this.overlayState === 'find') this.hideOverlay()
+    if (!this.peekView) {
+      const view = new WebContentsView({
+        webPreferences: { session: this.tabSession, sandbox: true, contextIsolation: true }
+      })
+      view.setBorderRadius(RADIUS)
+      view.setBackgroundColor('#ffffff')
+      const wc = view.webContents
+      const sendInfo = (): void => this.sendOverlay({ type: 'peek-info', url: wc.getURL(), title: wc.getTitle() })
+      wc.on('page-title-updated', sendInfo)
+      wc.on('did-navigate', sendInfo)
+      wc.on('did-navigate-in-page', sendInfo)
+      wc.setWindowOpenHandler((details) => {
+        if (details.disposition === 'new-window') {
+          return { action: 'allow', overrideBrowserWindowOptions: { width: 520, height: 680, autoHideMenuBar: true } }
+        }
+        void wc.loadURL(details.url).catch(() => {})
+        return { action: 'deny' }
+      })
+      this.registerShortcuts(wc)
+      this.peekView = view
+    }
+    this.overlayState = 'peek'
+    this.overlay.setVisible(true)
+    this.win.contentView.addChildView(this.overlay)
+    this.win.contentView.addChildView(this.peekView)
+    void this.peekView.webContents.loadURL(url).catch(() => {})
+    this.layout()
+    this.sendOverlay({ type: 'peek', rect: this.peekRect(), url, title: url })
+    this.peekView.webContents.focus()
+  }
+
+  private closePeek(): void {
+    const view = this.peekView
+    this.peekView = null
+    if (!view) return
+    this.win.contentView.removeChildView(view)
+    view.webContents.close()
   }
 
   // ---------------------------------------------------------------- Archive
@@ -1456,6 +1563,7 @@ export class Shell {
       else if (ctrl && !input.shift && key === 's') this.toggleSidebar()
       else if (ctrl && !input.shift && key === 'd') this.runCommand('pin')
       else if (ctrl && !input.shift && key === 'f') this.openFindBar()
+      else if (key === 'escape' && this.overlayState === 'peek') this.hideOverlay()
       else if (ctrl && !input.shift && key === ',') this.setPanel(this.panel === 'settings' ? null : 'settings')
       else if (ctrl && key === 'tab') this.cycleTab(input.shift ? -1 : 1)
       // Physical key (code), not the character: on AZERTY the "1" key types "&" without Shift.

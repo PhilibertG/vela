@@ -3,10 +3,12 @@
   import type { CommandBarMode, Suggestion } from '../../../shared/types'
   import Favicon from '../lib/Favicon.svelte'
   import Icon from '../lib/Icon.svelte'
+  import { hostOf } from '../lib/util'
 
   const vela = window.vela
 
-  let view = $state<'none' | 'command' | 'find'>('none')
+  let view = $state<'none' | 'command' | 'find' | 'peek'>('none')
+  let peek = $state<{ rect: { x: number; y: number; width: number; height: number }; url: string; title: string } | null>(null)
   let mode = $state<CommandBarMode>('new-tab')
   let query = $state('')
   let results = $state<Suggestion[]>([])
@@ -63,6 +65,11 @@
       findInput?.focus()
       findInput?.select()
       if (findText) vela.overlay({ type: 'find', text: findText, forward: true, findNext: false })
+    } else if (message.type === 'peek') {
+      view = 'peek'
+      peek = { rect: message.rect, url: message.url, title: message.title }
+    } else if (message.type === 'peek-info') {
+      if (peek) peek = { ...peek, url: message.url, title: message.title }
     } else if (message.type === 'find-result') {
       findResult = { active: message.active, matches: message.matches }
     }
@@ -176,6 +183,20 @@
       {/if}
     </div>
   {/key}
+{:else if view === 'peek' && peek}
+  <div class="scrim peek-scrim" role="presentation" onmousedown={() => vela.overlay({ type: 'peek-close' })}></div>
+  <div
+    class="peek-bar"
+    style:left="{peek.rect.x}px"
+    style:top="{peek.rect.y - 44}px"
+    style:width="{peek.rect.width}px"
+  >
+    <Favicon url={peek.url} size={16} />
+    <span class="peek-title">{peek.title || hostOf(peek.url)}</span>
+    <span class="peek-host">{hostOf(peek.url)}</span>
+    <button title="Ouvrir en onglet" onclick={() => vela.overlay({ type: 'peek-expand' })}><Icon name="expand" size={14} /><span>Ouvrir en onglet</span></button>
+    <button title="Fermer (Échap)" onclick={() => vela.overlay({ type: 'peek-close' })}><Icon name="close" size={14} /></button>
+  </div>
 {:else if view === 'find'}
   <div class="find">
     <input
@@ -204,6 +225,60 @@
     inset: 0;
     background: var(--scrim);
     border-radius: 12px;
+  }
+
+  .peek-scrim {
+    animation: fade 120ms ease-out;
+  }
+
+  @keyframes fade {
+    from {
+      opacity: 0;
+    }
+  }
+
+  .peek-bar {
+    position: fixed;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 36px;
+    padding: 0 6px 0 12px;
+    border-radius: 10px;
+    background: var(--panel);
+    border: 1px solid var(--panel-line);
+    box-shadow: 0 8px 24px hsl(0 0% 0% / 0.2);
+    animation: fade 120ms ease-out;
+  }
+
+  .peek-title {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-weight: 500;
+  }
+
+  .peek-host {
+    color: var(--fg-muted);
+    font-size: 12px;
+  }
+
+  .peek-bar button {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    height: 26px;
+    padding: 0 8px;
+    border-radius: 6px;
+    color: var(--fg-muted);
+    font-size: 12.5px;
+  }
+
+  .peek-bar button:hover {
+    background: var(--item-hover);
+    color: var(--fg);
   }
 
   .panel {

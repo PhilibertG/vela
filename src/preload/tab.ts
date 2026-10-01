@@ -1,6 +1,7 @@
-// Script chargé dans chaque page des onglets. Il ne fait quelque chose que sur le Chrome Web Store :
-// il masque les invitations « Passer à Chrome », qui ne servent à rien dans Vela
-// (l'installation des extensions fonctionne déjà).
+// Script loaded in every tab page (isolated from the page's own scripts). Two jobs:
+// - on the Chrome Web Store, hide the "Switch to Chrome" prompts (installing extensions already works in Vela);
+// - report link clicks so Vela can open them in Peek.
+import { ipcRenderer } from 'electron'
 
 const PROMO_TEXT = /^(Switch to Chrome|Passer à Chrome|Utiliser Chrome|Installer Chrome)/i
 
@@ -35,3 +36,19 @@ if (location.hostname === 'chromewebstore.google.com') {
   if (document.body) start()
   else document.addEventListener('DOMContentLoaded', start, { once: true })
 }
+
+// Link clicks are reported to Vela, which decides whether they open in Peek (Shift+click, or a pinned
+// tab linking to another site). Only the URL of the clicked link is sent; the page gets no access to Vela.
+document.addEventListener(
+  'click',
+  (e) => {
+    if (e.button !== 0 || e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return
+    const link = (e.target as Element | null)?.closest?.('a[href]')
+    if (!(link instanceof HTMLAnchorElement) || !/^https?:$/.test(link.protocol)) return
+    if (ipcRenderer.sendSync('vela:link-click', link.href, e.shiftKey) === true) {
+      e.preventDefault()
+      e.stopImmediatePropagation()
+    }
+  },
+  true
+)
