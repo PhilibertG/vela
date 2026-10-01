@@ -1232,8 +1232,9 @@ export class Shell {
       else if (ctrl && !input.shift && key === 'f') this.openFindBar()
       else if (ctrl && !input.shift && key === ',') this.setSettingsOpen(!this.settingsOpen)
       else if (ctrl && key === 'tab') this.cycleTab(input.shift ? -1 : 1)
-      else if (ctrl && /^[1-9]$/.test(input.key)) {
-        const space = this.state.spaces[Number(input.key) - 1]
+      // Physical key (code), not the character: on AZERTY the "1" key types "&" without Shift.
+      else if (ctrl && /^(Digit|Numpad)[1-9]$/.test(input.code)) {
+        const space = this.state.spaces[Number(input.code.slice(-1)) - 1]
         if (space) this.selectSpace(space.id)
       } else if (input.alt && key === 'arrowleft') this.activeWebContents()?.navigationHistory.goBack()
       else if (input.alt && key === 'arrowright') this.activeWebContents()?.navigationHistory.goForward()

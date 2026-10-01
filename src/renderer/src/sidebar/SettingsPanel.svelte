@@ -211,6 +211,12 @@
     font: inherit;
   }
 
+  /* The dropdown list is drawn by the system: without explicit colors, light text lands on a white background. */
+  option {
+    background-color: var(--panel);
+    color: var(--fg);
+  }
+
   input[type='range'] {
     width: 180px;
     accent-color: var(--accent);
