@@ -135,6 +135,30 @@
     el.addEventListener('pointerup', up)
   }
 
+  // ------------------------------------------------------------ Swipe between Spaces
+
+  // Two-finger horizontal swipe on the sidebar switches Space, like Arc.
+  // Trackpads report it as horizontal wheel events; small movements add up until the threshold.
+  const SWIPE_THRESHOLD = 120
+  const SWIPE_COOLDOWN_MS = 450
+  let swipeDelta = 0
+  let swipeLockedUntil = 0
+  let swipeReset: ReturnType<typeof setTimeout> | undefined
+
+  function onSidebarWheel(e: WheelEvent): void {
+    if (!app || !space || Math.abs(e.deltaX) <= Math.abs(e.deltaY)) return
+    if (performance.now() < swipeLockedUntil) return
+    swipeDelta += e.deltaX
+    clearTimeout(swipeReset)
+    swipeReset = setTimeout(() => (swipeDelta = 0), 200)
+    if (Math.abs(swipeDelta) < SWIPE_THRESHOLD) return
+    const index = app.spaces.indexOf(space) + (swipeDelta > 0 ? 1 : -1)
+    swipeDelta = 0
+    swipeLockedUntil = performance.now() + SWIPE_COOLDOWN_MS
+    const target = app.spaces[index]
+    if (target) send({ type: 'select-space', spaceId: target.id })
+  }
+
   function finishRename(spaceId: string, value: string): void {
     editingSpace = null
     send({ type: 'rename-space', spaceId, name: value })
@@ -241,6 +265,7 @@
       class:right={onRight}
       style:top="{TOPBAR_HEIGHT}px"
       style:width="{settings.sidebarWidth - MARGIN}px"
+      onwheel={onSidebarWheel}
     >
       <section
         class="favorites"
