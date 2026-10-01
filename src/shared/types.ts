@@ -34,6 +34,8 @@ export interface Space {
   today: string[]
   activeTabId: string | null
   split: Split | null
+  /** 'own': cookies, logins and site data separate from the other Spaces. */
+  profile: 'shared' | 'own'
 }
 
 /** Folder of the pinned section. Can hold tabs and other folders. */

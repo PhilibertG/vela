@@ -8,13 +8,16 @@ import {
   dialog,
   ipcMain,
   nativeImage,
+  session,
   systemPreferences,
   type MenuItemConstructorOptions,
   type Session,
   type WebContents
 } from 'electron'
 import { join } from 'node:path'
-import type { ElectronChromeExtensions } from 'electron-chrome-extensions'
+import { existsSync } from 'node:fs'
+import { ElectronChromeExtensions } from 'electron-chrome-extensions'
+import { rm } from 'node:fs/promises'
 import { uninstallExtension } from 'electron-chrome-web-store'
 import type {
   Action,
@@ -33,6 +36,7 @@ import type {
 } from '../shared/types'
 import { SIDEBAR_ANIMATION_MS, SPLIT_GAP, contentRect, easeOutCubic } from '../shared/layout'
 import { folderAndDescendants, pinnedHas, pinnedTabIds } from '../shared/folders'
+import { SHARED_PARTITION, partitionOf } from '../shared/profiles'
 import { Archive, History, loadState, makeFolder, makeSpace, makeTab, saveNow, scheduleSave } from './state'
 import { suggest, toUrl } from './suggest'
 
@@ -122,7 +126,10 @@ export class Shell {
   private peekView: WebContentsView | null = null
   private emitScheduled = false
   private extensionsReady = false
-  private extensions: ElectronChromeExtensions | null = null
+  /** Sessions of the Spaces with their own profile, by partition. */
+  private readonly profileSessions = new Map<string, Session>()
+  /** Gives a new profile session the same setup as the shared one (user agent, preload, extensions). */
+  private setupProfile: ((s: Session) => void) | null = null
   /** Vrai pendant la fermeture : les pages détruites ne doivent pas être retirées de l'état. */
   private closing = false
   /** Panel shown in place of the pages, if any. */
@@ -192,6 +199,7 @@ export class Shell {
 
     this.registerIpc()
     const notifyExtensions = (): void => this.sendUiEvent({ type: 'extensions-changed' })
+    this.shareExtensions(this.tabSession)
     this.tabSession.extensions.on('extension-loaded', notifyExtensions)
     this.tabSession.extensions.on('extension-unloaded', notifyExtensions)
     this.layout()
@@ -205,8 +213,12 @@ export class Shell {
 
   // ---------------------------------------------------------------- Démarrage
 
-  attachExtensions(extensions: ElectronChromeExtensions): void {
-    this.extensions = extensions
+  setProfileSetup(setup: (s: Session) => void): void {
+    this.setupProfile = setup
+  }
+
+  private extensionsOf(wc: WebContents): ElectronChromeExtensions | undefined {
+    return ElectronChromeExtensions.fromSession(wc.session)
   }
 
   /** Appelé une fois les extensions chargées : on peut créer les vues des onglets. */
@@ -374,7 +386,7 @@ export class Shell {
     const tab = this.state.tabs[tabId]
 
     const view = new WebContentsView({
-      webPreferences: { session: this.tabSession, sandbox: true, contextIsolation: true }
+      webPreferences: { session: this.sessionForTab(tabId), sandbox: true, contextIsolation: true }
     })
     view.setBorderRadius(RADIUS)
     view.setBackgroundColor('#ffffff')
@@ -388,7 +400,7 @@ export class Shell {
     this.views.set(tabId, view)
     this.tabByWc.set(wc.id, tabId)
     this.wireTab(tabId, wc)
-    this.extensions?.addTab(wc, this.win)
+    this.extensionsOf(wc)?.addTab(wc, this.win)
 
     tab.asleep = false
     void wc.loadURL(tab.url).catch(() => {
@@ -457,7 +469,7 @@ export class Shell {
       const space = this.activeSpace()
       if (space.split && space.activeTabId !== tabId && this.visibleTabIds().includes(tabId)) {
         space.activeTabId = tabId
-        this.extensions?.selectTab(wc)
+        this.extensionsOf(wc)?.selectTab(wc)
         this.emit()
       }
     })
@@ -498,7 +510,7 @@ export class Shell {
     // webContents est indéfini si la page a déjà été détruite (window.close(), fermeture...).
     const wc = view.webContents as WebContents | undefined
     if (wc && !wc.isDestroyed()) {
-      this.extensions?.removeTab(wc)
+      this.extensionsOf(wc)?.removeTab(wc)
       wc.close()
     }
     const tab = this.state.tabs[tabId]
@@ -536,7 +548,7 @@ export class Shell {
     const wc = this.activeWebContents()
     if (wc) {
       if (this.overlayState !== 'command') wc.focus()
-      this.extensions?.selectTab(wc)
+      this.extensionsOf(wc)?.selectTab(wc)
     } else if (this.overlayState !== 'command') {
       // No page shown (empty Space): without this, the keyboard stays on a hidden page and shortcuts stop working.
       this.ui.webContents.focus()
@@ -691,6 +703,9 @@ export class Shell {
 
     if (to === 'today') tab.homeUrl = undefined
     else if (!tab.homeUrl) tab.homeUrl = tab.url
+    // Moving to a Space (or favorites) with another profile reloads the page in that profile.
+    const view = this.views.get(tabId)
+    if (view && view.webContents.session !== this.sessionForTab(tabId)) this.destroyView(tabId)
 
     // Un onglet déplacé vers un autre espace n'y est plus actif.
     if (source && source !== target && source.activeTabId === tabId && to !== 'favorites') {
@@ -740,6 +755,10 @@ export class Shell {
     this.detachPinned(id)
     const list = parent?.items ?? target.pinned
     list.splice(Math.max(0, Math.min(index, list.length)), 0, id)
+    for (const tabId of movedTabs) {
+      const view = this.views.get(tabId)
+      if (view && view.webContents.session !== this.sessionForTab(tabId)) this.destroyView(tabId)
+    }
     // Moving a folder to another Space takes its tabs along: the source Space must not keep one active.
     if (source && source !== target && source.activeTabId && movedTabs.includes(source.activeTabId)) {
       source.activeTabId = this.pinnedTabs(source)[0] ?? source.today[0] ?? null
@@ -835,14 +854,20 @@ export class Shell {
     if (!space) return
     const tabIds = [...this.pinnedTabs(space), ...space.today]
     const count = tabIds.length
-    if (count > 0) {
+    // Own profile data stays on disk after a switch back to the shared profile: it goes with the Space.
+    const ownPartition = partitionOf({ id: space.id, profile: 'own' })
+    const profileDir = join(app.getPath('userData'), 'Partitions', ownPartition.replace(/^persist:/, ''))
+    const hasOwnData = space.profile === 'own' || existsSync(profileDir)
+    if (count > 0 || hasOwnData) {
+      const details = [count > 0 ? `Ses ${count} onglets seront fermés.` : '']
+      if (hasOwnData) details.push('Ses connexions et données de sites (profil propre) seront effacées.')
       const { response } = await dialog.showMessageBox(this.win, {
         type: 'warning',
         buttons: ['Supprimer', 'Annuler'],
         defaultId: 1,
         cancelId: 1,
         message: `Supprimer l'espace « ${space.name} » ?`,
-        detail: `Ses ${count} onglets seront fermés.`
+        detail: details.filter(Boolean).join('\n')
       })
       if (response !== 0) return
     }
@@ -856,6 +881,19 @@ export class Shell {
     this.state.spaces = this.state.spaces.filter((s) => s.id !== spaceId)
     if (this.state.activeSpaceId === spaceId) this.state.activeSpaceId = this.state.spaces[0].id
     this.showActive()
+    if (hasOwnData) await this.eraseProfile(ownPartition, profileDir)
+  }
+
+  private async eraseProfile(partition: string, dir: string): Promise<void> {
+    const s = this.profileSessions.get(partition) ?? session.fromPartition(partition)
+    this.profileSessions.delete(partition)
+    try {
+      await s.clearStorageData()
+      await s.clearCache()
+      await rm(dir, { recursive: true, force: true })
+    } catch (err) {
+      console.error('[vela] profile erase failed', err)
+    }
   }
 
   // ---------------------------------------------------------------- Barre de commande et recherche
@@ -1082,7 +1120,7 @@ export class Shell {
       { label: 'Suivant', enabled: wc.navigationHistory.canGoForward(), click: () => wc.navigationHistory.goForward() },
       { label: 'Actualiser', click: () => wc.reload() }
     )
-    const extensionItems = this.extensions?.getContextMenuItems(wc, params) ?? []
+    const extensionItems = this.extensionsOf(wc)?.getContextMenuItems(wc, params) ?? []
     if (extensionItems.length) items.push({ type: 'separator' })
     const menu = Menu.buildFromTemplate(items)
     for (const item of extensionItems) menu.append(item)
@@ -1146,9 +1184,110 @@ export class Shell {
           }
         }))
       },
+      {
+        label: 'Profil',
+        submenu: [
+          {
+            label: 'Commun (connexions partagées avec les autres espaces)',
+            type: 'radio',
+            checked: space.profile !== 'own',
+            click: () => void this.setSpaceProfile(spaceId, 'shared')
+          },
+          {
+            label: 'Propre à cet espace (ses propres connexions)',
+            type: 'radio',
+            checked: space.profile === 'own',
+            click: () => void this.setSpaceProfile(spaceId, 'own')
+          }
+        ]
+      },
       { type: 'separator' },
       { label: "Supprimer l'espace", enabled: this.state.spaces.length > 1, click: () => void this.deleteSpace(spaceId) }
     ]).popup({ window: this.win })
+  }
+
+  // ---------------------------------------------------------------- Profiles
+
+  private allSessions(): Session[] {
+    return [this.tabSession, ...this.profileSessions.values()]
+  }
+
+  private sessionForSpace(space: Space): Session {
+    const partition = partitionOf(space)
+    if (partition === SHARED_PARTITION) return this.tabSession
+    let s = this.profileSessions.get(partition)
+    if (!s) {
+      s = session.fromPartition(partition)
+      this.profileSessions.set(partition, s)
+      this.shareExtensions(s)
+      this.setupProfile?.(s)
+      // Same extensions as the shared profile (store-installed or not, turned off ones excluded).
+      for (const ext of this.tabSession.extensions.getAllExtensions()) {
+        s.extensions.loadExtension(ext.path).catch((err) => console.error('[vela] extension share failed', err))
+      }
+    }
+    return s
+  }
+
+  /** Favorites are shown in every Space: they use the shared profile. */
+  private sessionForTab(tabId: string): Session {
+    if (this.state.favorites.includes(tabId)) return this.tabSession
+    const space = this.spaceOf(tabId)
+    return space ? this.sessionForSpace(space) : this.tabSession
+  }
+
+  /** An extension installed or loaded in one profile is loaded in all the others (unless turned off). */
+  private shareExtensions(source: Session): void {
+    source.extensions.on('extension-loaded', (_e, ext) => {
+      if (this.state.settings.disabledExtensions.includes(ext.id)) {
+        if (!this.disabledExtensions.has(ext.id)) {
+          this.disabledExtensions.set(ext.id, { name: ext.name, version: ext.version, path: ext.path, icon: extensionIcon(ext) })
+        }
+        // Removed once the extension libraries are done with the load event.
+        setImmediate(() => source.extensions.getExtension(ext.id) && source.extensions.removeExtension(ext.id))
+        return
+      }
+      for (const s of this.allSessions()) {
+        if (s === source || s.extensions.getExtension(ext.id)) continue
+        s.extensions.loadExtension(ext.path).catch((err) => console.error('[vela] extension share failed', err))
+      }
+    })
+  }
+
+  /** Tabs whose page was opened with another profile are put to sleep: they reload in the right one. */
+  private refreshTabSessions(tabIds: string[]): void {
+    let changed = false
+    for (const id of tabIds) {
+      const view = this.views.get(id)
+      if (view && view.webContents.session !== this.sessionForTab(id)) {
+        this.destroyView(id)
+        changed = true
+      }
+    }
+    if (changed) this.showActive()
+  }
+
+  private async setSpaceProfile(spaceId: string, profile: Space['profile']): Promise<void> {
+    const space = this.state.spaces.find((s) => s.id === spaceId)
+    if (!space || space.profile === profile) return
+    const { response } = await dialog.showMessageBox(this.win, {
+      type: 'question',
+      buttons: ['Changer de profil', 'Annuler'],
+      defaultId: 0,
+      cancelId: 1,
+      message:
+        profile === 'own'
+          ? `Donner à « ${space.name} » son propre profil ?`
+          : `Faire revenir « ${space.name} » au profil commun ?`,
+      detail:
+        profile === 'own'
+          ? 'Ses onglets se rechargent sans les connexions actuelles : il faudra vous reconnecter aux sites dans cet espace. Les extensions restent disponibles.'
+          : "Ses onglets se rechargent avec les connexions du profil commun. Les données du profil propre restent sur l'ordinateur et reviennent si vous le réactivez."
+    })
+    if (response !== 0) return
+    space.profile = profile
+    this.refreshTabSessions([...this.pinnedTabs(space), ...space.today])
+    this.emit()
   }
 
   // ---------------------------------------------------------------- Settings
@@ -1196,9 +1335,12 @@ export class Shell {
     if (!/^https?:\/\//i.test(url)) return
     if (this.panel) this.setPanel(null)
     if (this.overlayState === 'command' || this.overlayState === 'find') this.hideOverlay()
+    // Peek uses the profile of the page it was opened from.
+    const peekSession = this.activeWebContents()?.session ?? this.tabSession
+    if (this.peekView && this.peekView.webContents.session !== peekSession) this.closePeek()
     if (!this.peekView) {
       const view = new WebContentsView({
-        webPreferences: { session: this.tabSession, sandbox: true, contextIsolation: true }
+        webPreferences: { session: peekSession, sandbox: true, contextIsolation: true }
       })
       view.setBorderRadius(RADIUS)
       view.setBackgroundColor('#ffffff')
@@ -1317,10 +1459,12 @@ export class Shell {
     const kept: string[] = []
     for (const id of this.state.settings.disabledExtensions) {
       const ext = this.tabSession.extensions.getExtension(id)
-      if (!ext) continue // Uninstalled meanwhile.
-      this.disabledExtensions.set(id, { name: ext.name, version: ext.version, path: ext.path, icon: extensionIcon(ext) })
-      this.tabSession.extensions.removeExtension(id)
-      kept.push(id)
+      if (ext) {
+        this.disabledExtensions.set(id, { name: ext.name, version: ext.version, path: ext.path, icon: extensionIcon(ext) })
+        this.tabSession.extensions.removeExtension(id)
+      }
+      // Not found and never seen at load time: uninstalled meanwhile.
+      if (ext || this.disabledExtensions.has(id)) kept.push(id)
     }
     this.state.settings.disabledExtensions = kept
   }
@@ -1329,19 +1473,22 @@ export class Shell {
     if (enabled) {
       const ext = this.disabledExtensions.get(id)
       if (!ext) return
-      try {
-        await this.tabSession.extensions.loadExtension(ext.path)
-      } catch (err) {
-        console.error('[vela] extension reload failed', err)
-        return
-      }
+      // Marked enabled first, so that loading it in one profile propagates to the others.
       this.disabledExtensions.delete(id)
       this.state.settings.disabledExtensions = this.state.settings.disabledExtensions.filter((x) => x !== id)
+      for (const s of this.allSessions()) {
+        if (s.extensions.getExtension(id)) continue
+        try {
+          await s.extensions.loadExtension(ext.path)
+        } catch (err) {
+          console.error('[vela] extension reload failed', err)
+        }
+      }
     } else {
       const ext = this.tabSession.extensions.getExtension(id)
       if (!ext) return
       this.disabledExtensions.set(id, { name: ext.name, version: ext.version, path: ext.path, icon: extensionIcon(ext) })
-      this.tabSession.extensions.removeExtension(id)
+      for (const s of this.allSessions()) if (s.extensions.getExtension(id)) s.extensions.removeExtension(id)
       if (!this.state.settings.disabledExtensions.includes(id)) this.state.settings.disabledExtensions.push(id)
     }
     this.emit()
@@ -1369,6 +1516,7 @@ export class Shell {
     })
     if (response !== 0) return
     await uninstallExtension(id, { session: this.tabSession })
+    for (const s of this.profileSessions.values()) if (s.extensions.getExtension(id)) s.extensions.removeExtension(id)
     this.disabledExtensions.delete(id)
     this.state.settings.disabledExtensions = this.state.settings.disabledExtensions.filter((x) => x !== id)
     this.emit()

@@ -3,6 +3,7 @@
   import { Tween } from 'svelte/motion'
   import type { Action, Folder, Panel, Space, State, Tab } from '../../../shared/types'
   import { folderAndDescendants } from '../../../shared/folders'
+  import { SHARED_PARTITION, partitionOf } from '../../../shared/profiles'
   import {
     MARGIN,
     SIDEBAR_ANIMATION_MS,
@@ -67,6 +68,8 @@
   const activeId = $derived(space?.activeTabId ?? null)
   const activeTab = $derived<Tab | null>(app && activeId ? (app.tabs[activeId] ?? null) : null)
   const settings = $derived(app?.settings)
+  // Extension buttons belong to the profile of the active Space.
+  const partition = $derived(space ? partitionOf(space) : SHARED_PARTITION)
   const splitShown = $derived(
     !!space?.split && (space.split.left === activeId || space.split.right === activeId)
   )
@@ -394,7 +397,9 @@
 
     <div class="group">
       <div class="extensions">
-        <browser-action-list partition="persist:vela" alignment="bottom left"></browser-action-list>
+        {#key partition}
+          <browser-action-list {partition} alignment="bottom left"></browser-action-list>
+        {/key}
       </div>
       <button title="Extensions" onclick={() => send({ type: 'manage-extensions' })}><Icon name="puzzle" size={15} /></button>
       <button title="Archive" onclick={() => send({ type: 'open-panel', panel: 'archive' })}><Icon name="archive" size={15} /></button>
@@ -464,7 +469,12 @@
             }}
           />
         {:else}
-          <span ondblclick={() => (editingSpace = space!.id)} role="textbox" tabindex="-1">{space.name}</span>
+          <span class="space-name" ondblclick={() => (editingSpace = space!.id)} role="textbox" tabindex="-1">
+            {space.name}
+            {#if space.profile === 'own'}
+              <span class="profile-badge" title="Profil propre : connexions séparées des autres espaces"><Icon name="user" size={12} /></span>
+            {/if}
+          </span>
           <button class="title-btn" title="Nouveau dossier" onclick={() => send({ type: 'new-folder', spaceId: space!.id })}><Icon name="folder-plus" size={14} /></button>
         {/if}
       </div>
@@ -770,6 +780,17 @@
     font-weight: 600;
     color: var(--fg-muted);
     font-size: 12px;
+  }
+
+  .space-name {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .profile-badge {
+    display: grid;
+    color: var(--accent);
   }
 
   .title-btn {

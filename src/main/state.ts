@@ -55,7 +55,8 @@ export function makeSpace(index: number, name?: string): Space {
     pinned: [],
     today: [],
     activeTabId: null,
-    split: null
+    split: null,
+    profile: 'shared'
   }
 }
 
@@ -137,6 +138,7 @@ export function loadState(): State {
       return true
     })
   for (const space of state.spaces) {
+    if (space.profile !== 'own') space.profile = 'shared'
     space.pinned = cleanTree(space.pinned)
     space.today = space.today.filter(exists)
     if (space.activeTabId && !exists(space.activeTabId)) space.activeTabId = null
