@@ -1,8 +1,16 @@
 <script lang="ts">
   import { tick } from 'svelte'
+  import { Tween } from 'svelte/motion'
   import type { Action, Folder, Space, State, Tab } from '../../../shared/types'
   import { folderAndDescendants } from '../../../shared/folders'
-  import { MARGIN, SPLIT_GAP, TOPBAR_HEIGHT, contentRect } from '../../../shared/layout'
+  import {
+    MARGIN,
+    SIDEBAR_ANIMATION_MS,
+    SPLIT_GAP,
+    TOPBAR_HEIGHT,
+    contentRect,
+    easeOutCubic
+  } from '../../../shared/layout'
   import Icon from '../lib/Icon.svelte'
   import Favicon from '../lib/Favicon.svelte'
   import SettingsPanel from './SettingsPanel.svelte'
@@ -64,8 +72,28 @@
     document.documentElement.style.setProperty('--hue', String(space?.hue ?? 215))
   })
 
+  // Sidebar show/hide: same duration and curve as the page views moved by shell.ts.
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  const reveal = new Tween(1, { duration: reducedMotion ? 0 : SIDEBAR_ANIMATION_MS, easing: easeOutCubic })
+  let revealReady = false
+  $effect(() => {
+    if (!settings) return
+    const target = settings.sidebarVisible ? 1 : 0
+    // First state received: no animation at startup.
+    if (!revealReady) {
+      revealReady = true
+      void reveal.set(target, { duration: 0 })
+    } else {
+      reveal.target = target
+    }
+  })
+  const sidebarShown = $derived(reveal.current > 0.001)
+  const sidebarSettled = $derived(reveal.current === 1 && !!settings?.sidebarVisible)
+
   // Zone occupée par les pages, identique au calcul de shell.ts.
-  const content = $derived(settings ? contentRect(winWidth, winHeight, settings) : { x: 0, y: 0, width: 0, height: 0 })
+  const content = $derived(
+    settings ? contentRect(winWidth, winHeight, settings, reveal.current) : { x: 0, y: 0, width: 0, height: 0 }
+  )
   const onRight = $derived(settings?.sidebarSide === 'right')
   const secure = $derived(activeTab ? activeTab.url.startsWith('https:') : false)
 
@@ -374,12 +402,14 @@
     </div>
   </header>
 
-  {#if settings.sidebarVisible}
+  {#if sidebarShown}
     <aside
       class="sidebar"
       class:right={onRight}
       style:top="{TOPBAR_HEIGHT}px"
       style:width="{settings.sidebarWidth - MARGIN}px"
+      style:transform="translateX({(onRight ? 1 : -1) * (1 - reveal.current) * settings.sidebarWidth}px)"
+      style:opacity={0.4 + 0.6 * reveal.current}
       onwheel={onSidebarWheel}
     >
       <section
@@ -501,6 +531,7 @@
       </footer>
     </aside>
 
+    {#if sidebarSettled}
     <div
       class="resize-handle"
       style:left="{onRight ? winWidth - settings.sidebarWidth : settings.sidebarWidth - MARGIN}px"
@@ -509,7 +540,9 @@
       aria-orientation="vertical"
       onpointerdown={(e) => startResize(e, 'sidebar')}
     ></div>
-  {:else}
+    {/if}
+  {/if}
+  {#if !settings.sidebarVisible}
     <button class="reveal" class:right={onRight} style:top="{TOPBAR_HEIGHT}px" title="Afficher la barre latérale (Ctrl+S)" onclick={() => send({ type: 'toggle-sidebar' })}></button>
   {/if}
 

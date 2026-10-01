@@ -8,6 +8,7 @@ import {
   dialog,
   ipcMain,
   nativeImage,
+  systemPreferences,
   type MenuItemConstructorOptions,
   type Session,
   type WebContents
@@ -29,7 +30,7 @@ import type {
   Tab,
   UiEvent
 } from '../shared/types'
-import { SPLIT_GAP, contentRect } from '../shared/layout'
+import { SIDEBAR_ANIMATION_MS, SPLIT_GAP, contentRect, easeOutCubic } from '../shared/layout'
 import { folderAndDescendants, pinnedHas, pinnedTabIds } from '../shared/folders'
 import { History, loadState, makeFolder, makeSpace, makeTab, saveNow, scheduleSave } from './state'
 import { suggest, toUrl } from './suggest'
@@ -106,12 +107,16 @@ export class Shell {
   /** Vrai pendant la fermeture : les pages détruites ne doivent pas être retirées de l'état. */
   private closing = false
   private settingsOpen = false
+  /** 0 = sidebar hidden, 1 = shown. Animated between the two. */
+  private sidebarReveal = 1
+  private sidebarAnimation: NodeJS.Timeout | null = null
   /** Extensions turned off in settings: unloaded, but kept on disk so they can be turned back on. */
   private readonly disabledExtensions = new Map<string, DisabledExtension>()
   readonly metrics: Metrics = { startupMs: null, commandBarMs: [] }
 
   constructor(private readonly tabSession: Session) {
     this.state = loadState()
+    this.sidebarReveal = this.state.settings.sidebarVisible ? 1 : 0
 
     this.win = new BaseWindow({
       width: 1320,
@@ -268,7 +273,7 @@ export class Shell {
 
   private contentRect(): Electron.Rectangle {
     const [width, height] = this.win.getContentSize()
-    return contentRect(width, height, this.state.settings)
+    return contentRect(width, height, this.state.settings, this.sidebarReveal)
   }
 
   /** Onglets à afficher : l'onglet actif, ou les deux panneaux de la vue partagée. */
@@ -939,8 +944,31 @@ export class Shell {
 
   private toggleSidebar(): void {
     this.state.settings.sidebarVisible = !this.state.settings.sidebarVisible
-    this.layout()
+    this.animateSidebar()
     this.emit()
+  }
+
+  /** Moves the page views along with the sidebar animation drawn by the interface. */
+  private animateSidebar(): void {
+    const target = this.state.settings.sidebarVisible ? 1 : 0
+    const from = this.sidebarReveal
+    if (this.sidebarAnimation) clearInterval(this.sidebarAnimation)
+    this.sidebarAnimation = null
+    if (from === target || systemPreferences.getAnimationSettings().prefersReducedMotion) {
+      this.sidebarReveal = target
+      this.layout()
+      return
+    }
+    const start = performance.now()
+    this.sidebarAnimation = setInterval(() => {
+      const t = Math.min(1, (performance.now() - start) / SIDEBAR_ANIMATION_MS)
+      this.sidebarReveal = from + (target - from) * easeOutCubic(t)
+      this.layout()
+      if (t === 1 && this.sidebarAnimation) {
+        clearInterval(this.sidebarAnimation)
+        this.sidebarAnimation = null
+      }
+    }, 16)
   }
 
   private async showMetrics(): Promise<void> {

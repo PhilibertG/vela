@@ -5,6 +5,13 @@ export const MARGIN = 8
 export const SPLIT_GAP = 8
 /** Bar across the top of the window: drag area, navigation, address, extensions, window controls. */
 export const TOPBAR_HEIGHT = 40
+/** Sidebar show/hide animation. Main (page views) and renderer (sidebar) use the same timing. */
+export const SIDEBAR_ANIMATION_MS = 180
+
+export function easeOutCubic(t: number): number {
+  const f = t - 1
+  return f * f * f + 1
+}
 
 export interface Rect {
   x: number
@@ -13,9 +20,17 @@ export interface Rect {
   height: number
 }
 
-/** Area where web pages are shown. Single source of truth for main (views) and renderer (drawing). */
-export function contentRect(winWidth: number, winHeight: number, settings: Settings): Rect {
-  const sidebar = settings.sidebarVisible ? settings.sidebarWidth : MARGIN
+/**
+ * Area where web pages are shown. Single source of truth for main (views) and renderer (drawing).
+ * reveal: 0 = sidebar hidden, 1 = shown; values in between during the animation.
+ */
+export function contentRect(
+  winWidth: number,
+  winHeight: number,
+  settings: Settings,
+  reveal = settings.sidebarVisible ? 1 : 0
+): Rect {
+  const sidebar = Math.round(MARGIN + (settings.sidebarWidth - MARGIN) * reveal)
   const onRight = settings.sidebarSide === 'right'
   const x = onRight ? MARGIN : sidebar
   return {
