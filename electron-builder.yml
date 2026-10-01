@@ -1,0 +1,22 @@
+appId: app.vela.browser
+productName: Vela
+directories:
+  output: dist
+files:
+  - out/**/*
+  - package.json
+linux:
+  target:
+    - AppImage
+    - deb
+  maintainer: PhilibertG
+  category: Network
+  syncDesktopName: true
+  artifactName: ${productName}-${version}-linux-${arch}.${ext}
+win:
+  target: nsis
+  artifactName: ${productName}-${version}-windows-${arch}-setup.${ext}
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+publish: null

@@ -1,0 +1,70 @@
+:root {
+  --hue: 215;
+  --bg-solid: hsl(var(--hue) 30% 90%);
+  --bg-a: hsl(var(--hue) 55% 88%);
+  --bg-b: hsl(calc(var(--hue) + 35) 45% 82%);
+  --fg: hsl(var(--hue) 25% 14%);
+  --fg-muted: hsl(var(--hue) 12% 38%);
+  --fg-faint: hsl(var(--hue) 10% 58%);
+  --item-hover: hsl(0 0% 100% / 0.35);
+  --item-active: hsl(0 0% 100% / 0.78);
+  --item-active-shadow: 0 1px 2px hsl(var(--hue) 30% 20% / 0.14);
+  --line: hsl(var(--hue) 20% 20% / 0.1);
+  --accent: hsl(var(--hue) 70% 48%);
+  --panel: hsl(0 0% 100% / 0.96);
+  --panel-line: hsl(var(--hue) 15% 20% / 0.12);
+  --scrim: hsl(var(--hue) 30% 10% / 0.22);
+  --radius: 8px;
+  --font: 'Inter', 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg-solid: hsl(var(--hue) 18% 13%);
+    --bg-a: hsl(var(--hue) 28% 17%);
+    --bg-b: hsl(calc(var(--hue) + 35) 22% 12%);
+    --fg: hsl(var(--hue) 20% 92%);
+    --fg-muted: hsl(var(--hue) 10% 68%);
+    --fg-faint: hsl(var(--hue) 8% 46%);
+    --item-hover: hsl(0 0% 100% / 0.06);
+    --item-active: hsl(0 0% 100% / 0.13);
+    --item-active-shadow: none;
+    --line: hsl(0 0% 100% / 0.08);
+    --accent: hsl(var(--hue) 75% 66%);
+    --panel: hsl(var(--hue) 14% 15% / 0.98);
+    --panel-line: hsl(0 0% 100% / 0.09);
+    --scrim: hsl(0 0% 0% / 0.4);
+    color-scheme: dark;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  font-family: var(--font);
+  font-size: 13px;
+  color: var(--fg);
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: default;
+}
+
+input {
+  font: inherit;
+  color: inherit;
+}
