@@ -7,6 +7,7 @@ import {
   clipboard,
   dialog,
   ipcMain,
+  nativeImage,
   type MenuItemConstructorOptions,
   type Session,
   type WebContents
@@ -17,22 +18,57 @@ import { uninstallExtension } from 'electron-chrome-web-store'
 import type {
   Action,
   CommandBarMode,
+  ExtensionInfo,
   Metrics,
   OverlayAction,
   OverlayMessage,
+  Settings,
   Space,
   State,
   Suggestion,
   Tab,
   UiEvent
 } from '../shared/types'
-import { MARGIN, SPLIT_GAP } from '../shared/layout'
+import { SPLIT_GAP, contentRect } from '../shared/layout'
 import { History, loadState, makeSpace, makeTab, saveNow, scheduleSave } from './state'
 import { suggest, toUrl } from './suggest'
 
 const RADIUS = 10
 const FIND_BAR = { width: 360, height: 56 }
 const WEB_STORE_URL = 'https://chromewebstore.google.com/'
+const SLEEP_CHOICES = [5, 15, 30, 60, 240]
+
+interface DisabledExtension {
+  name: string
+  version: string
+  path: string
+  icon?: string
+}
+
+function extensionIcon(ext: Electron.Extension): string | undefined {
+  const icons = (ext.manifest as chrome.runtime.Manifest).icons
+  if (!icons) return undefined
+  const sizes = Object.keys(icons).map(Number).sort((a, b) => a - b)
+  const size = sizes.find((n) => n >= 32) ?? sizes[sizes.length - 1]
+  const image = nativeImage.createFromPath(join(ext.path, icons[size]))
+  return image.isEmpty() ? undefined : image.resize({ width: 32, height: 32 }).toDataURL()
+}
+
+/** Keeps only valid values: the renderer is trusted, but the saved file may be edited by hand. */
+function sanitizeSettings(patch: Partial<Settings>): Partial<Settings> {
+  const out: Partial<Settings> = {}
+  if (patch.sidebarSide === 'left' || patch.sidebarSide === 'right') out.sidebarSide = patch.sidebarSide
+  if (typeof patch.sidebarWidth === 'number' && Number.isFinite(patch.sidebarWidth)) {
+    out.sidebarWidth = Math.min(420, Math.max(180, Math.round(patch.sidebarWidth)))
+  }
+  if (typeof patch.searchUrl === 'string' && /^https:\/\/\S+$/.test(patch.searchUrl) && patch.searchUrl.includes('%s')) {
+    out.searchUrl = patch.searchUrl
+  }
+  if (typeof patch.sleepAfterMinutes === 'number' && SLEEP_CHOICES.includes(patch.sleepAfterMinutes)) {
+    out.sleepAfterMinutes = patch.sleepAfterMinutes
+  }
+  return out
+}
 
 interface ClosedTab {
   tab: Tab
@@ -68,6 +104,9 @@ export class Shell {
   private extensions: ElectronChromeExtensions | null = null
   /** Vrai pendant la fermeture : les pages détruites ne doivent pas être retirées de l'état. */
   private closing = false
+  private settingsOpen = false
+  /** Extensions turned off in settings: unloaded, but kept on disk so they can be turned back on. */
+  private readonly disabledExtensions = new Map<string, DisabledExtension>()
   readonly metrics: Metrics = { startupMs: null, commandBarMs: [] }
 
   constructor(private readonly tabSession: Session) {
@@ -125,6 +164,9 @@ export class Shell {
     this.win.on('closed', () => app.quit())
 
     this.registerIpc()
+    const notifyExtensions = (): void => this.sendUiEvent({ type: 'extensions-changed' })
+    this.tabSession.extensions.on('extension-loaded', notifyExtensions)
+    this.tabSession.extensions.on('extension-unloaded', notifyExtensions)
     this.layout()
 
     // Met en veille les onglets inactifs pour libérer de la mémoire.
@@ -140,6 +182,7 @@ export class Shell {
   /** Appelé une fois les extensions chargées : on peut créer les vues des onglets. */
   onExtensionsReady(): void {
     this.extensionsReady = true
+    this.unloadDisabledExtensions()
     const space = this.activeSpace()
     if (!space.activeTabId) space.activeTabId = space.pinned[0] ?? space.today[0] ?? null
     this.showActive()
@@ -160,6 +203,7 @@ export class Shell {
       suggest(query, mode, this.state, this.history.all())
     )
     ipcMain.on('vela:overlay', (_e, action: OverlayAction) => this.handleOverlayAction(action))
+    ipcMain.handle('vela:extensions', () => this.listExtensions())
   }
 
   // ---------------------------------------------------------------- État
@@ -212,14 +256,7 @@ export class Shell {
 
   private contentRect(): Electron.Rectangle {
     const [width, height] = this.win.getContentSize()
-    const { sidebarVisible, sidebarWidth } = this.state.settings
-    const left = sidebarVisible ? sidebarWidth : MARGIN
-    return {
-      x: left,
-      y: MARGIN,
-      width: Math.max(0, width - left - MARGIN),
-      height: Math.max(0, height - 2 * MARGIN)
-    }
+    return contentRect(width, height, this.state.settings)
   }
 
   /** Onglets à afficher : l'onglet actif, ou les deux panneaux de la vue partagée. */
@@ -238,7 +275,8 @@ export class Shell {
     this.ui.setBounds({ x: 0, y: 0, width, height })
 
     const rect = this.contentRect()
-    const visible = this.visibleTabIds()
+    // The settings panel is drawn by the interface, in place of the pages.
+    const visible = this.settingsOpen ? [] : this.visibleTabIds()
     const bounds = new Map<string, Electron.Rectangle>()
     if (visible.length === 2) {
       const ratio = this.activeSpace().split!.ratio
@@ -432,6 +470,7 @@ export class Shell {
 
   /** Crée les vues visibles, les place et donne le focus à l'onglet actif. */
   private showActive(): void {
+    if (this.settingsOpen) this.setSettingsOpen(false)
     if (this.extensionsReady) {
       for (const id of this.visibleTabIds()) {
         this.ensureView(id)
@@ -799,6 +838,9 @@ export class Shell {
       case 'perf':
         void this.showMetrics()
         break
+      case 'settings':
+        this.setSettingsOpen(true)
+        break
     }
   }
 
@@ -935,6 +977,103 @@ export class Shell {
     ]).popup({ window: this.win })
   }
 
+  // ---------------------------------------------------------------- Settings
+
+  private setSettingsOpen(open: boolean): void {
+    if (this.settingsOpen === open) return
+    this.settingsOpen = open
+    if (open && this.overlayState !== 'hidden') this.hideOverlay()
+    this.layout()
+    this.sendUiEvent({ type: 'settings', open })
+    if (open) this.ui.webContents.focus()
+    else this.activeWebContents()?.focus()
+  }
+
+  private listExtensions(): ExtensionInfo[] {
+    const loaded = this.tabSession.extensions.getAllExtensions().map((ext) => {
+      const manifest = ext.manifest as chrome.runtime.Manifest
+      return {
+        id: ext.id,
+        name: ext.name,
+        version: ext.version,
+        enabled: true,
+        hasOptions: !!(manifest.options_ui?.page ?? manifest.options_page),
+        icon: extensionIcon(ext)
+      }
+    })
+    const disabled = [...this.disabledExtensions].map(([id, ext]) => ({
+      id,
+      name: ext.name,
+      version: ext.version,
+      enabled: false,
+      hasOptions: false,
+      icon: ext.icon
+    }))
+    return [...loaded, ...disabled].sort((a, b) => a.name.localeCompare(b.name))
+  }
+
+  private unloadDisabledExtensions(): void {
+    const kept: string[] = []
+    for (const id of this.state.settings.disabledExtensions) {
+      const ext = this.tabSession.extensions.getExtension(id)
+      if (!ext) continue // Uninstalled meanwhile.
+      this.disabledExtensions.set(id, { name: ext.name, version: ext.version, path: ext.path, icon: extensionIcon(ext) })
+      this.tabSession.extensions.removeExtension(id)
+      kept.push(id)
+    }
+    this.state.settings.disabledExtensions = kept
+  }
+
+  private async setExtensionEnabled(id: string, enabled: boolean): Promise<void> {
+    if (enabled) {
+      const ext = this.disabledExtensions.get(id)
+      if (!ext) return
+      try {
+        await this.tabSession.extensions.loadExtension(ext.path)
+      } catch (err) {
+        console.error('[vela] extension reload failed', err)
+        return
+      }
+      this.disabledExtensions.delete(id)
+      this.state.settings.disabledExtensions = this.state.settings.disabledExtensions.filter((x) => x !== id)
+    } else {
+      const ext = this.tabSession.extensions.getExtension(id)
+      if (!ext) return
+      this.disabledExtensions.set(id, { name: ext.name, version: ext.version, path: ext.path, icon: extensionIcon(ext) })
+      this.tabSession.extensions.removeExtension(id)
+      if (!this.state.settings.disabledExtensions.includes(id)) this.state.settings.disabledExtensions.push(id)
+    }
+    this.emit()
+    this.sendUiEvent({ type: 'extensions-changed' })
+  }
+
+  private openExtensionOptions(id: string): void {
+    const ext = this.tabSession.extensions.getExtension(id)
+    if (!ext) return
+    const manifest = ext.manifest as chrome.runtime.Manifest
+    const page = manifest.options_ui?.page ?? manifest.options_page
+    if (page) this.newTab(`${ext.url}${page}`)
+  }
+
+  private async confirmUninstall(id: string): Promise<void> {
+    const name = this.tabSession.extensions.getExtension(id)?.name ?? this.disabledExtensions.get(id)?.name
+    if (!name) return
+    const { response } = await dialog.showMessageBox(this.win, {
+      type: 'warning',
+      buttons: ['Désinstaller', 'Annuler'],
+      defaultId: 1,
+      cancelId: 1,
+      message: `Désinstaller « ${name} » ?`,
+      detail: "L'extension et ses données seront supprimées."
+    })
+    if (response !== 0) return
+    await uninstallExtension(id, { session: this.tabSession })
+    this.disabledExtensions.delete(id)
+    this.state.settings.disabledExtensions = this.state.settings.disabledExtensions.filter((x) => x !== id)
+    this.emit()
+    this.sendUiEvent({ type: 'extensions-changed' })
+  }
+
   private showExtensionsMenu(): void {
     const extensions = this.tabSession.extensions.getAllExtensions()
     const items: MenuItemConstructorOptions[] = extensions.map((ext) => {
@@ -1042,6 +1181,26 @@ export class Shell {
       case 'manage-extensions':
         this.showExtensionsMenu()
         break
+      case 'open-settings':
+        this.setSettingsOpen(true)
+        break
+      case 'close-settings':
+        this.setSettingsOpen(false)
+        break
+      case 'update-settings':
+        Object.assign(this.state.settings, sanitizeSettings(action.settings))
+        this.layout()
+        this.emit()
+        break
+      case 'extension-options':
+        this.openExtensionOptions(action.id)
+        break
+      case 'extension-toggle':
+        void this.setExtensionEnabled(action.id, action.enabled)
+        break
+      case 'extension-uninstall':
+        void this.confirmUninstall(action.id)
+        break
     }
   }
 
@@ -1071,6 +1230,7 @@ export class Shell {
       else if (ctrl && !input.shift && key === 's') this.toggleSidebar()
       else if (ctrl && !input.shift && key === 'd') this.runCommand('pin')
       else if (ctrl && !input.shift && key === 'f') this.openFindBar()
+      else if (ctrl && !input.shift && key === ',') this.setSettingsOpen(!this.settingsOpen)
       else if (ctrl && key === 'tab') this.cycleTab(input.shift ? -1 : 1)
       else if (ctrl && /^[1-9]$/.test(input.key)) {
         const space = this.state.spaces[Number(input.key) - 1]

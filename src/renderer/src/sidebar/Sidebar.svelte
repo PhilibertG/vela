@@ -1,9 +1,10 @@
 <script lang="ts">
   import { tick } from 'svelte'
   import type { Action, Space, State, Tab } from '../../../shared/types'
-  import { MARGIN, SPLIT_GAP } from '../../../shared/layout'
+  import { MARGIN, SPLIT_GAP, TOPBAR_HEIGHT, contentRect } from '../../../shared/layout'
   import Icon from '../lib/Icon.svelte'
   import Favicon from '../lib/Favicon.svelte'
+  import SettingsPanel from './SettingsPanel.svelte'
   import { hostOf } from '../lib/util'
 
   type ListName = 'favorites' | 'pinned' | 'today'
@@ -14,6 +15,8 @@
   let app = $state<State | null>(null)
   let editingSpace = $state<string | null>(null)
   let maximized = $state(false)
+  let settingsOpen = $state(false)
+  let extensionsVersion = $state(0)
   let winWidth = $state(window.innerWidth)
   let winHeight = $state(window.innerHeight)
 
@@ -32,6 +35,8 @@
   vela.onEvent((e) => {
     if (e.type === 'edit-space-name') editingSpace = e.spaceId
     if (e.type === 'window-state') maximized = e.maximized
+    if (e.type === 'settings') settingsOpen = e.open
+    if (e.type === 'extensions-changed') extensionsVersion++
   })
 
   const space = $derived<Space | null>(
@@ -49,10 +54,9 @@
   })
 
   // Zone occupée par les pages, identique au calcul de shell.ts.
-  const content = $derived.by(() => {
-    const left = settings?.sidebarVisible ? settings.sidebarWidth : MARGIN
-    return { x: left, y: MARGIN, width: Math.max(0, winWidth - left - MARGIN), height: winHeight - 2 * MARGIN }
-  })
+  const content = $derived(settings ? contentRect(winWidth, winHeight, settings) : { x: 0, y: 0, width: 0, height: 0 })
+  const onRight = $derived(settings?.sidebarSide === 'right')
+  const secure = $derived(activeTab ? activeTab.url.startsWith('https:') : false)
 
   function tabsOf(list: string[]): Tab[] {
     return app ? list.map((id) => app!.tabs[id]).filter(Boolean) : []
@@ -116,7 +120,10 @@
     const move = (ev: PointerEvent): void => {
       cancelAnimationFrame(frame)
       frame = requestAnimationFrame(() => {
-        if (kind === 'sidebar') send({ type: 'set-sidebar-width', width: ev.clientX + MARGIN / 2 })
+        if (kind === 'sidebar') {
+          const width = onRight ? winWidth - ev.clientX : ev.clientX
+          send({ type: 'set-sidebar-width', width: width + MARGIN / 2 })
+        }
         else send({ type: 'set-split-ratio', ratio: (ev.clientX - content.x - SPLIT_GAP / 2) / (content.width - SPLIT_GAP) })
       })
     }
@@ -195,36 +202,46 @@
 {#if app && space && settings}
   <div class="backdrop" class:rounded={!maximized}></div>
 
-  {#if settings.sidebarVisible}
-    <aside class="sidebar" style:width="{settings.sidebarWidth - MARGIN}px">
-      <header class="titlebar">
-        <div class="nav">
-          <button title="Masquer la barre latérale (Ctrl+S)" onclick={() => send({ type: 'toggle-sidebar' })}><Icon name="sidebar" /></button>
-          <button title="Précédent (Alt+←)" disabled={!activeTab?.canGoBack} onclick={() => send({ type: 'go-back' })}><Icon name="back" /></button>
-          <button title="Suivant (Alt+→)" disabled={!activeTab?.canGoForward} onclick={() => send({ type: 'go-forward' })}><Icon name="forward" /></button>
-          <button title="Actualiser (Ctrl+R)" disabled={!activeTab} onclick={() => send({ type: 'reload' })}><Icon name="reload" /></button>
-        </div>
-        <div class="window-controls">
-          <button title="Réduire" onclick={() => send({ type: 'window', command: 'minimize' })}><Icon name="minimize" size={14} /></button>
-          <button title="Agrandir" onclick={() => send({ type: 'window', command: 'maximize' })}><Icon name="maximize" size={13} /></button>
-          <button class="quit" title="Fermer" onclick={() => send({ type: 'window', command: 'close' })}><Icon name="close" size={14} /></button>
-        </div>
-      </header>
+  <header class="topbar" style:height="{TOPBAR_HEIGHT}px">
+    <div class="group">
+      <button title="{settings.sidebarVisible ? 'Masquer' : 'Afficher'} la barre latérale (Ctrl+S)" onclick={() => send({ type: 'toggle-sidebar' })}><Icon name="sidebar" /></button>
+      <button title="Précédent (Alt+←)" disabled={!activeTab?.canGoBack} onclick={() => send({ type: 'go-back' })}><Icon name="back" /></button>
+      <button title="Suivant (Alt+→)" disabled={!activeTab?.canGoForward} onclick={() => send({ type: 'go-forward' })}><Icon name="forward" /></button>
+      <button title="Actualiser (Ctrl+R)" disabled={!activeTab} onclick={() => send({ type: 'reload' })}><Icon name="reload" /></button>
+    </div>
 
-      <button class="urlbar" title="Modifier l'adresse (Ctrl+L)" onclick={() => send({ type: 'open-command-bar', mode: 'edit-url' })}>
-        {#if activeTab}
-          <span class="host">{hostOf(activeTab.url)}</span>
-          {#if activeTab.loading}<span class="spinner"></span>{/if}
-        {:else}
-          <span class="placeholder">Rechercher ou saisir une adresse</span>
-        {/if}
-      </button>
+    <button class="urlbar" title="Modifier l'adresse (Ctrl+L)" onclick={() => send({ type: 'open-command-bar', mode: 'edit-url' })}>
+      {#if activeTab}
+        <span class="lock" class:insecure={!secure} title={secure ? 'Connexion chiffrée (HTTPS)' : 'Connexion non chiffrée'}>
+          <Icon name={secure ? 'lock' : 'unlock'} size={13} />
+        </span>
+        <span class="host">{hostOf(activeTab.url)}</span>
+        {#if activeTab.loading}<span class="spinner"></span>{/if}
+      {:else}
+        <span class="placeholder">Rechercher ou saisir une adresse</span>
+      {/if}
+    </button>
 
+    <div class="group">
       <div class="extensions">
-        <browser-action-list partition="persist:vela" alignment="bottom right"></browser-action-list>
-        <button class="ext-btn" title="Extensions" onclick={() => send({ type: 'manage-extensions' })}><Icon name="puzzle" size={15} /></button>
+        <browser-action-list partition="persist:vela" alignment="bottom left"></browser-action-list>
       </div>
+      <button title="Extensions" onclick={() => send({ type: 'manage-extensions' })}><Icon name="puzzle" size={15} /></button>
+      <button title="Réglages (Ctrl+,)" onclick={() => send({ type: 'open-settings' })}><Icon name="gear" size={15} /></button>
+      <span class="sep"></span>
+      <button title="Réduire" onclick={() => send({ type: 'window', command: 'minimize' })}><Icon name="minimize" size={14} /></button>
+      <button title={maximized ? 'Restaurer' : 'Agrandir'} onclick={() => send({ type: 'window', command: 'maximize' })}><Icon name="maximize" size={13} /></button>
+      <button class="quit" title="Fermer" onclick={() => send({ type: 'window', command: 'close' })}><Icon name="close" size={14} /></button>
+    </div>
+  </header>
 
+  {#if settings.sidebarVisible}
+    <aside
+      class="sidebar"
+      class:right={onRight}
+      style:top="{TOPBAR_HEIGHT}px"
+      style:width="{settings.sidebarWidth - MARGIN}px"
+    >
       <section
         class="favorites"
         class:empty={app.favorites.length === 0}
@@ -347,13 +364,14 @@
 
     <div
       class="resize-handle"
-      style:left="{settings.sidebarWidth - MARGIN}px"
+      style:left="{onRight ? winWidth - settings.sidebarWidth : settings.sidebarWidth - MARGIN}px"
+      style:top="{TOPBAR_HEIGHT}px"
       role="separator"
       aria-orientation="vertical"
       onpointerdown={(e) => startResize(e, 'sidebar')}
     ></div>
   {:else}
-    <button class="reveal" title="Afficher la barre latérale (Ctrl+S)" onclick={() => send({ type: 'toggle-sidebar' })}></button>
+    <button class="reveal" class:right={onRight} style:top="{TOPBAR_HEIGHT}px" title="Afficher la barre latérale (Ctrl+S)" onclick={() => send({ type: 'toggle-sidebar' })}></button>
   {/if}
 
   <!-- Zone des pages : visible seulement quand aucun onglet ne la recouvre. -->
@@ -364,7 +382,9 @@
     style:width="{content.width}px"
     style:height="{content.height}px"
   >
-    {#if !activeTab}
+    {#if settingsOpen}
+      <SettingsPanel {settings} {extensionsVersion} />
+    {:else if !activeTab}
       <div class="empty">
         <p class="empty-title">{space.name}</p>
         <p>
@@ -376,7 +396,7 @@
     {/if}
   </div>
 
-  {#if splitShown && space.split}
+  {#if splitShown && space.split && !settingsOpen}
     <div
       class="split-handle"
       role="separator"
@@ -406,25 +426,43 @@
 
   .sidebar {
     position: fixed;
-    top: 0;
     left: 0;
     bottom: 0;
     display: flex;
     flex-direction: column;
     gap: 6px;
-    padding: 6px 4px 8px 10px;
+    padding: 0 4px 8px 10px;
   }
 
-  .titlebar {
+  .sidebar.right {
+    left: auto;
+    right: 0;
+    padding: 0 10px 8px 4px;
+  }
+
+  .topbar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    height: 32px;
+    gap: 12px;
+    padding: 0 8px;
     -webkit-app-region: drag;
   }
 
-  .titlebar button {
+  .topbar button {
     -webkit-app-region: no-drag;
+  }
+
+  .group {
+    display: flex;
+    align-items: center;
+    gap: 1px;
+  }
+
+  .group > button {
     display: grid;
     place-items: center;
     width: 28px;
@@ -433,31 +471,35 @@
     color: var(--fg-muted);
   }
 
-  .titlebar button:hover:not(:disabled) {
+  .group > button:hover:not(:disabled) {
     background: var(--item-hover);
     color: var(--fg);
   }
 
-  .titlebar button:disabled {
+  .group > button:disabled {
     opacity: 0.35;
   }
 
-  .nav,
-  .window-controls {
-    display: flex;
-    gap: 1px;
-  }
-
-  .window-controls .quit:hover {
+  .group .quit:hover {
     background: hsl(0 75% 52%) !important;
     color: white !important;
+  }
+
+  .sep {
+    width: 1px;
+    height: 16px;
+    margin: 0 6px;
+    background: var(--line);
   }
 
   .urlbar {
     display: flex;
     align-items: center;
     gap: 8px;
-    height: 36px;
+    flex: 1;
+    max-width: 560px;
+    height: 28px;
+    margin: 0 auto;
     padding: 0 12px;
     border-radius: var(--radius);
     background: var(--item-hover);
@@ -467,6 +509,15 @@
 
   .urlbar:hover {
     background: var(--item-active);
+  }
+
+  .urlbar .lock {
+    display: grid;
+    color: var(--fg-muted);
+  }
+
+  .urlbar .lock.insecure {
+    color: hsl(0 70% 55%);
   }
 
   .urlbar .host {
@@ -484,30 +535,11 @@
   .extensions {
     display: flex;
     align-items: center;
-    justify-content: flex-end;
-    gap: 2px;
-    min-height: 26px;
+    -webkit-app-region: no-drag;
   }
 
   .extensions browser-action-list {
     display: flex;
-    flex-wrap: wrap;
-    flex: 1;
-    justify-content: flex-end;
-  }
-
-  .ext-btn {
-    display: grid;
-    place-items: center;
-    width: 26px;
-    height: 26px;
-    border-radius: 6px;
-    color: var(--fg-muted);
-  }
-
-  .ext-btn:hover {
-    background: var(--item-hover);
-    color: var(--fg);
   }
 
   .favorites {
@@ -815,7 +847,6 @@
 
   .resize-handle {
     position: fixed;
-    top: 0;
     bottom: 0;
     width: 8px;
     cursor: col-resize;
@@ -824,9 +855,13 @@
   .reveal {
     position: fixed;
     left: 0;
-    top: 0;
     bottom: 0;
     width: 8px;
+  }
+
+  .reveal.right {
+    left: auto;
+    right: 0;
   }
 
   .reveal:hover {

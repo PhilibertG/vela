@@ -13,7 +13,10 @@
     maximize: 'M7 7h10v10H7z',
     sound: 'M5 10v4h3l4 4V6L8 10zM16 9a4 4 0 0 1 0 6',
     reset: 'M4 12a8 8 0 1 0 2.3-5.7M4 4v5h5',
-    moon: 'M12 3a7 7 0 1 0 9 9 9 9 0 1 1-9-9z'
+    moon: 'M12 3a7 7 0 1 0 9 9 9 9 0 1 1-9-9z',
+    lock: 'M6 11h12v9H6zM8 11V8a4 4 0 0 1 8 0v3',
+    unlock: 'M6 11h12v9H6zM8 11V8a4 4 0 0 1 7.5-2',
+    gear: 'M4 6h9M17 6h3M15 4v4M4 12h3M11 12h9M9 10v4M4 18h11M19 18h1M17 16v4'
   }
   let { name, size = 16 }: { name: keyof typeof paths; size?: number } = $props()
 </script>

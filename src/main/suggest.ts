@@ -12,7 +12,8 @@ const COMMANDS: { id: string; title: string; keywords: string; shortcut?: string
   { id: 'find', title: 'Rechercher dans la page', keywords: 'find rechercher page', shortcut: 'Ctrl+F' },
   { id: 'reopen', title: 'Rouvrir le dernier onglet fermé', keywords: 'rouvrir fermé reopen', shortcut: 'Ctrl+Shift+T' },
   { id: 'devtools', title: 'Outils de développement', keywords: 'devtools inspecter console', shortcut: 'F12' },
-  { id: 'perf', title: 'Performances de Vela', keywords: 'performances mémoire stats perf' }
+  { id: 'perf', title: 'Performances de Vela', keywords: 'performances mémoire stats perf' },
+  { id: 'settings', title: 'Réglages', keywords: 'réglages paramètres settings préférences options', shortcut: 'Ctrl+,' }
 ]
 
 const SCHEME = /^[a-z][a-z0-9+.-]*:/i

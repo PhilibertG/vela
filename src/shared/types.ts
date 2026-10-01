@@ -35,9 +35,14 @@ export interface Space {
   split: Split | null
 }
 
+export type SidebarSide = 'left' | 'right'
+
 export interface Settings {
   sidebarWidth: number
   sidebarVisible: boolean
+  sidebarSide: SidebarSide
+  /** Extensions installed but turned off (not loaded). */
+  disabledExtensions: string[]
   searchUrl: string
   sleepAfterMinutes: number
 }
@@ -101,6 +106,23 @@ export type Action =
   | { type: 'open-command-bar'; mode: CommandBarMode }
   | { type: 'window'; command: 'minimize' | 'maximize' | 'close' }
   | { type: 'manage-extensions' }
+  | { type: 'open-settings' }
+  | { type: 'close-settings' }
+  | { type: 'update-settings'; settings: Partial<Settings> }
+  | { type: 'extension-options'; id: string }
+  | { type: 'extension-toggle'; id: string; enabled: boolean }
+  | { type: 'extension-uninstall'; id: string }
+
+/** Installed extension, as shown in the settings panel. */
+export interface ExtensionInfo {
+  id: string
+  name: string
+  version: string
+  enabled: boolean
+  hasOptions: boolean
+  /** data: URL, absent when the extension has no icon. */
+  icon?: string
+}
 
 export type OverlayAction =
   | { type: 'submit'; mode: CommandBarMode; suggestion: Suggestion }
@@ -118,3 +140,5 @@ export type OverlayMessage =
 export type UiEvent =
   | { type: 'edit-space-name'; spaceId: string }
   | { type: 'window-state'; maximized: boolean }
+  | { type: 'settings'; open: boolean }
+  | { type: 'extensions-changed' }

@@ -13,6 +13,8 @@ const SPACE_HUES = [215, 340, 145, 30, 270, 185, 0, 95]
 export const DEFAULT_SETTINGS: Settings = {
   sidebarWidth: 248,
   sidebarVisible: true,
+  sidebarSide: 'left',
+  disabledExtensions: [],
   searchUrl: 'https://www.google.com/search?q=%s',
   sleepAfterMinutes: 15
 }
@@ -82,6 +84,9 @@ export function loadState(): State {
     activeSpaceId: saved.activeSpaceId,
     settings: { ...DEFAULT_SETTINGS, ...saved.settings }
   }
+  // Settings saved by an older version (or edited by hand) may lack fields or hold bad values.
+  if (state.settings.sidebarSide !== 'left' && state.settings.sidebarSide !== 'right') state.settings.sidebarSide = 'left'
+  if (!Array.isArray(state.settings.disabledExtensions)) state.settings.disabledExtensions = []
   // Au démarrage, aucune vue n'existe : tous les onglets sont en veille.
   for (const tab of Object.values(state.tabs)) {
     tab.asleep = true
