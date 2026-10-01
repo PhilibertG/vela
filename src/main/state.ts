@@ -1,10 +1,12 @@
 import { app } from 'electron'
-import { readFileSync, writeFileSync, renameSync } from 'node:fs'
+import { copyFileSync, existsSync, readFileSync, writeFileSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import type { HistoryEntry, Settings, Space, State, Tab } from '../shared/types'
+import type { Folder, HistoryEntry, Settings, Space, State, Tab } from '../shared/types'
 
 const STATE_FILE = 'vela-state.json'
+/** 1: before folders (no version field). 2: pinned section can hold folders. */
+const STATE_VERSION = 2
 const HISTORY_FILE = 'vela-history.json'
 const HISTORY_LIMIT = 5000
 
@@ -36,6 +38,10 @@ export function makeTab(url: string, title = ''): Tab {
   }
 }
 
+export function makeFolder(name = 'Nouveau dossier'): Folder {
+  return { id: newId(), name, open: true, items: [] }
+}
+
 export function makeSpace(index: number, name?: string): Space {
   return {
     id: newId(),
@@ -51,7 +57,15 @@ export function makeSpace(index: number, name?: string): Space {
 
 function defaultState(): State {
   const space = makeSpace(0, 'Perso')
-  return { tabs: {}, spaces: [space], favorites: [], activeSpaceId: space.id, settings: { ...DEFAULT_SETTINGS } }
+  return {
+    version: STATE_VERSION,
+    tabs: {},
+    folders: {},
+    spaces: [space],
+    favorites: [],
+    activeSpaceId: space.id,
+    settings: { ...DEFAULT_SETTINGS }
+  }
 }
 
 function filePath(name: string): string {
@@ -77,8 +91,16 @@ function writeJson(name: string, data: unknown): void {
 export function loadState(): State {
   const saved = readJson<State>(STATE_FILE)
   if (!saved || !Array.isArray(saved.spaces) || saved.spaces.length === 0) return defaultState()
+  // Keeps the file as it was before its format changes, once per old version.
+  const savedVersion = typeof saved.version === 'number' ? saved.version : 1
+  if (savedVersion < STATE_VERSION) {
+    const backup = filePath(`vela-state.v${savedVersion}.backup.json`)
+    if (!existsSync(backup)) copyFileSync(filePath(STATE_FILE), backup)
+  }
   const state: State = {
+    version: STATE_VERSION,
     tabs: saved.tabs ?? {},
+    folders: saved.folders && typeof saved.folders === 'object' ? saved.folders : {},
     spaces: saved.spaces,
     favorites: saved.favorites ?? [],
     activeSpaceId: saved.activeSpaceId,
@@ -96,12 +118,27 @@ export function loadState(): State {
   // Retire les références vers des onglets absents (fichier modifié à la main, crash...).
   const exists = (id: string): boolean => id in state.tabs
   state.favorites = state.favorites.filter(exists)
+  // Pinned tree: drops missing ids, duplicates and loops; a folder nobody points to is removed.
+  const placed = new Set<string>()
+  const cleanTree = (ids: string[]): string[] =>
+    ids.filter((id) => {
+      if (placed.has(id) || !(exists(id) || id in state.folders)) return false
+      placed.add(id)
+      const folder = state.folders[id]
+      if (folder) {
+        if (typeof folder.name !== 'string') folder.name = 'Dossier'
+        folder.open = folder.open !== false
+        folder.items = cleanTree(Array.isArray(folder.items) ? folder.items : [])
+      }
+      return true
+    })
   for (const space of state.spaces) {
-    space.pinned = space.pinned.filter(exists)
+    space.pinned = cleanTree(space.pinned)
     space.today = space.today.filter(exists)
     if (space.activeTabId && !exists(space.activeTabId)) space.activeTabId = null
     if (space.split && !(exists(space.split.left) && exists(space.split.right))) space.split = null
   }
+  for (const id of Object.keys(state.folders)) if (!placed.has(id)) delete state.folders[id]
   if (!state.spaces.some((s) => s.id === state.activeSpaceId)) state.activeSpaceId = state.spaces[0].id
   return state
 }

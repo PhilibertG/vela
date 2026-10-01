@@ -16,6 +16,9 @@
     moon: 'M12 3a7 7 0 1 0 9 9 9 9 0 1 1-9-9z',
     lock: 'M6 11h12v9H6zM8 11V8a4 4 0 0 1 8 0v3',
     unlock: 'M6 11h12v9H6zM8 11V8a4 4 0 0 1 7.5-2',
+    chevron: 'M9 6l6 6-6 6',
+    folder: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z',
+    'folder-plus': 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM12 10v6M9 13h6',
     gear: 'M4 6h9M17 6h3M15 4v4M4 12h3M11 12h9M9 10v4M4 18h11M19 18h1M17 16v4'
   }
   let { name, size = 16 }: { name: keyof typeof paths; size?: number } = $props()

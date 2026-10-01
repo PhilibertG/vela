@@ -1,4 +1,5 @@
 import type { CommandBarMode, HistoryEntry, State, Suggestion } from '../shared/types'
+import { pinnedHas } from '../shared/folders'
 
 const COMMANDS: { id: string; title: string; keywords: string; shortcut?: string }[] = [
   { id: 'new-space', title: 'Nouvel espace', keywords: 'space espace créer new' },
@@ -98,7 +99,7 @@ export function suggest(query: string, mode: CommandBarMode, state: State, histo
     .sort((a, b) => b.s - a.s || b.tab.lastActive - a.tab.lastActive)
     .slice(0, 4)
   for (const { tab } of tabMatches) {
-    const space = state.spaces.find((s) => s.pinned.includes(tab.id) || s.today.includes(tab.id))
+    const space = state.spaces.find((s) => s.today.includes(tab.id) || pinnedHas(state.folders, s, tab.id))
     results.push({
       kind: 'tab',
       title: tab.title,

@@ -30,7 +30,8 @@ import type {
   UiEvent
 } from '../shared/types'
 import { SPLIT_GAP, contentRect } from '../shared/layout'
-import { History, loadState, makeSpace, makeTab, saveNow, scheduleSave } from './state'
+import { folderAndDescendants, pinnedHas, pinnedTabIds } from '../shared/folders'
+import { History, loadState, makeFolder, makeSpace, makeTab, saveNow, scheduleSave } from './state'
 import { suggest, toUrl } from './suggest'
 
 const RADIUS = 10
@@ -184,7 +185,7 @@ export class Shell {
     this.extensionsReady = true
     this.unloadDisabledExtensions()
     const space = this.activeSpace()
-    if (!space.activeTabId) space.activeTabId = space.pinned[0] ?? space.today[0] ?? null
+    if (!space.activeTabId) space.activeTabId = this.pinnedTabs(space)[0] ?? space.today[0] ?? null
     this.showActive()
   }
 
@@ -212,12 +213,23 @@ export class Shell {
     return this.state.spaces.find((s) => s.id === this.state.activeSpaceId) ?? this.state.spaces[0]
   }
 
-  private spaceOf(tabId: string): Space | undefined {
-    return this.state.spaces.find((s) => s.pinned.includes(tabId) || s.today.includes(tabId))
+  private pinnedTabs(space: Space): string[] {
+    return pinnedTabIds(this.state.folders, space)
+  }
+
+  /** Space holding this tab (pinned, in any folder, or today) or this folder. */
+  private spaceOf(id: string): Space | undefined {
+    return this.state.spaces.find((s) => s.today.includes(id) || pinnedHas(this.state.folders, s, id))
   }
 
   private isKept(tabId: string): boolean {
-    return this.state.favorites.includes(tabId) || this.state.spaces.some((s) => s.pinned.includes(tabId))
+    return this.state.favorites.includes(tabId) || this.state.spaces.some((s) => pinnedHas(this.state.folders, s, tabId))
+  }
+
+  /** Removes a tab or folder id from the pinned tree of every Space. */
+  private detachPinned(id: string): void {
+    for (const s of this.state.spaces) s.pinned = s.pinned.filter((x) => x !== id)
+    for (const f of Object.values(this.state.folders)) f.items = f.items.filter((x) => x !== id)
   }
 
   private activeTabId(): string | null {
@@ -527,7 +539,7 @@ export class Shell {
 
   /** Liste des onglets de l'espace dans l'ordre d'affichage de la barre latérale. */
   private orderedTabs(space: Space): string[] {
-    return [...this.state.favorites, ...space.pinned, ...space.today]
+    return [...this.state.favorites, ...this.pinnedTabs(space), ...space.today]
   }
 
   private neighbourOf(tabId: string, space: Space): string | null {
@@ -610,17 +622,25 @@ export class Shell {
     wc.focus()
   }
 
-  private moveTab(tabId: string, to: 'favorites' | 'pinned' | 'today', index: number, spaceId?: string): void {
+  private moveTab(
+    tabId: string,
+    to: 'favorites' | 'pinned' | 'today',
+    index: number,
+    spaceId?: string,
+    folderId?: string
+  ): void {
     const tab = this.state.tabs[tabId]
     if (!tab) return
     const source = this.spaceOf(tabId)
+    const folder = to === 'pinned' && folderId ? this.state.folders[folderId] : undefined
     this.state.favorites = this.state.favorites.filter((id) => id !== tabId)
-    for (const s of this.state.spaces) {
-      s.pinned = s.pinned.filter((id) => id !== tabId)
-      s.today = s.today.filter((id) => id !== tabId)
-    }
-    const target = this.state.spaces.find((s) => s.id === spaceId) ?? this.activeSpace()
-    const list = to === 'favorites' ? this.state.favorites : to === 'pinned' ? target.pinned : target.today
+    this.detachPinned(tabId)
+    for (const s of this.state.spaces) s.today = s.today.filter((id) => id !== tabId)
+    // A folder belongs to one Space: dropping into it moves the tab to that Space.
+    const target =
+      (folder && this.spaceOf(folder.id)) ?? this.state.spaces.find((s) => s.id === spaceId) ?? this.activeSpace()
+    const list =
+      to === 'favorites' ? this.state.favorites : to === 'pinned' ? (folder?.items ?? target.pinned) : target.today
     list.splice(Math.max(0, Math.min(index, list.length)), 0, tabId)
 
     if (to === 'today') tab.homeUrl = undefined
@@ -638,8 +658,74 @@ export class Shell {
 
   private togglePin(tabId: string): void {
     const space = this.spaceOf(tabId) ?? this.activeSpace()
-    if (space.pinned.includes(tabId)) this.moveTab(tabId, 'today', 0, space.id)
+    if (pinnedHas(this.state.folders, space, tabId)) this.moveTab(tabId, 'today', 0, space.id)
     else this.moveTab(tabId, 'pinned', space.pinned.length, space.id)
+  }
+
+  // ---------------------------------------------------------------- Folders
+
+  private newFolder(spaceId?: string, parentId?: string): void {
+    const parent = parentId ? this.state.folders[parentId] : undefined
+    const space = (parent && this.spaceOf(parent.id)) ?? this.state.spaces.find((s) => s.id === spaceId) ?? this.activeSpace()
+    const folder = makeFolder()
+    this.state.folders[folder.id] = folder
+    if (parent) {
+      parent.items.push(folder.id)
+      parent.open = true
+    } else {
+      space.pinned.push(folder.id)
+    }
+    if (space.id !== this.state.activeSpaceId) this.selectSpace(space.id)
+    this.emit()
+    this.sendUiEvent({ type: 'edit-folder-name', id: folder.id })
+  }
+
+  private moveFolder(id: string, parentId: string | null, index: number, spaceId?: string): void {
+    const folder = this.state.folders[id]
+    if (!folder) return
+    const parent = parentId ? this.state.folders[parentId] : undefined
+    if (parentId && !parent) return
+    // A folder cannot go inside itself or one of its subfolders.
+    if (parentId && folderAndDescendants(this.state.folders, id).has(parentId)) return
+    const target = (parent && this.spaceOf(parent.id)) ?? this.state.spaces.find((s) => s.id === spaceId) ?? this.spaceOf(id)
+    if (!target) return
+    const movedTabs = pinnedTabIds(this.state.folders, { ...target, pinned: [id] })
+    const source = this.spaceOf(id)
+    this.detachPinned(id)
+    const list = parent?.items ?? target.pinned
+    list.splice(Math.max(0, Math.min(index, list.length)), 0, id)
+    // Moving a folder to another Space takes its tabs along: the source Space must not keep one active.
+    if (source && source !== target && source.activeTabId && movedTabs.includes(source.activeTabId)) {
+      source.activeTabId = this.pinnedTabs(source)[0] ?? source.today[0] ?? null
+      this.showActive()
+      return
+    }
+    this.emit()
+  }
+
+  /** Deletes the folder only: its tabs and subfolders move up to where the folder was. */
+  private deleteFolder(id: string): void {
+    const folder = this.state.folders[id]
+    if (!folder) return
+    const space = this.spaceOf(id)
+    const parent = Object.values(this.state.folders).find((f) => f.items.includes(id))
+    const list = parent?.items ?? space?.pinned
+    const index = list ? list.indexOf(id) : -1
+    if (!list || index < 0) return
+    list.splice(index, 1, ...folder.items)
+    delete this.state.folders[id]
+    this.emit()
+  }
+
+  private showFolderMenu(id: string): void {
+    const folder = this.state.folders[id]
+    if (!folder) return
+    Menu.buildFromTemplate([
+      { label: 'Renommer', click: () => this.sendUiEvent({ type: 'edit-folder-name', id }) },
+      { label: 'Nouveau sous-dossier', click: () => this.newFolder(undefined, id) },
+      { type: 'separator' },
+      { label: 'Supprimer le dossier (garder les onglets)', click: () => this.deleteFolder(id) }
+    ]).popup({ window: this.win })
   }
 
   private resetTab(tabId: string): void {
@@ -686,7 +772,7 @@ export class Shell {
     const space = this.state.spaces.find((s) => s.id === spaceId)
     if (!space) return
     this.state.activeSpaceId = space.id
-    if (!space.activeTabId) space.activeTabId = space.pinned[0] ?? space.today[0] ?? null
+    if (!space.activeTabId) space.activeTabId = this.pinnedTabs(space)[0] ?? space.today[0] ?? null
     this.showActive()
   }
 
@@ -701,7 +787,8 @@ export class Shell {
     if (this.state.spaces.length <= 1) return
     const space = this.state.spaces.find((s) => s.id === spaceId)
     if (!space) return
-    const count = space.pinned.length + space.today.length
+    const tabIds = [...this.pinnedTabs(space), ...space.today]
+    const count = tabIds.length
     if (count > 0) {
       const { response } = await dialog.showMessageBox(this.win, {
         type: 'warning',
@@ -713,9 +800,12 @@ export class Shell {
       })
       if (response !== 0) return
     }
-    for (const id of [...space.pinned, ...space.today]) {
+    for (const id of tabIds) {
       this.destroyView(id)
       delete this.state.tabs[id]
+    }
+    for (const id of Object.keys(this.state.folders)) {
+      if (pinnedHas(this.state.folders, space, id)) delete this.state.folders[id]
     }
     this.state.spaces = this.state.spaces.filter((s) => s.id !== spaceId)
     if (this.state.activeSpaceId === spaceId) this.state.activeSpaceId = this.state.spaces[0].id
@@ -923,7 +1013,7 @@ export class Shell {
     if (!tab) return
     const space = this.spaceOf(tabId)
     const isFavorite = this.state.favorites.includes(tabId)
-    const isPinned = !!space?.pinned.includes(tabId)
+    const isPinned = !!space && pinnedHas(this.state.folders, space, tabId)
     const others = this.state.spaces.filter((s) => s !== space)
     const items: MenuItemConstructorOptions[] = [
       isFavorite
@@ -960,6 +1050,7 @@ export class Shell {
     ]
     Menu.buildFromTemplate([
       { label: 'Renommer', click: () => this.sendUiEvent({ type: 'edit-space-name', spaceId }) },
+      { label: 'Nouveau dossier', click: () => this.newFolder(spaceId) },
       {
         label: 'Couleur',
         submenu: colors.map(([label, hue]) => ({
@@ -1138,8 +1229,30 @@ export class Shell {
         this.emit()
         break
       }
+      case 'new-folder':
+        this.newFolder(action.spaceId, action.parentId)
+        break
+      case 'rename-folder': {
+        const folder = this.state.folders[action.id]
+        const name = action.name.trim()
+        if (folder && name) folder.name = name.slice(0, 80)
+        this.emit()
+        break
+      }
+      case 'toggle-folder': {
+        const folder = this.state.folders[action.id]
+        if (folder) folder.open = !folder.open
+        this.emit()
+        break
+      }
+      case 'move-folder':
+        this.moveFolder(action.id, action.parentId, action.index, action.spaceId)
+        break
+      case 'folder-menu':
+        this.showFolderMenu(action.id)
+        break
       case 'move-tab':
-        this.moveTab(action.tabId, action.to, action.index, action.spaceId)
+        this.moveTab(action.tabId, action.to, action.index, action.spaceId, action.folderId)
         break
       case 'set-split-ratio': {
         const split = this.activeSpace().split

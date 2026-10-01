@@ -1,6 +1,7 @@
 <script lang="ts">
   import { tick } from 'svelte'
-  import type { Action, Space, State, Tab } from '../../../shared/types'
+  import type { Action, Folder, Space, State, Tab } from '../../../shared/types'
+  import { folderAndDescendants } from '../../../shared/folders'
   import { MARGIN, SPLIT_GAP, TOPBAR_HEIGHT, contentRect } from '../../../shared/layout'
   import Icon from '../lib/Icon.svelte'
   import Favicon from '../lib/Favicon.svelte'
@@ -14,6 +15,7 @@
 
   let app = $state<State | null>(null)
   let editingSpace = $state<string | null>(null)
+  let editingFolder = $state<string | null>(null)
   let maximized = $state(false)
   let settingsOpen = $state(false)
   let extensionsVersion = $state(0)
@@ -22,7 +24,15 @@
 
   // Glisser-déposer des onglets.
   let dragId = $state<string | null>(null)
-  let dropHint = $state<{ list: ListName; spaceId?: string; beforeId: string | null } | null>(null)
+  /** folderId: container in the pinned tree (null = top level). into: dropping onto a folder row. */
+  let dropHint = $state<{
+    list: ListName
+    spaceId?: string
+    folderId?: string | null
+    beforeId: string | null
+    into?: boolean
+  } | null>(null)
+  const draggingFolder = $derived(!!(dragId && app?.folders[dragId]))
 
   vela.getState().then(async (s) => {
     app = s
@@ -34,6 +44,7 @@
   vela.onState((s) => (app = s))
   vela.onEvent((e) => {
     if (e.type === 'edit-space-name') editingSpace = e.spaceId
+    if (e.type === 'edit-folder-name') editingFolder = e.id
     if (e.type === 'window-state') maximized = e.maximized
     if (e.type === 'settings') settingsOpen = e.open
     if (e.type === 'extensions-changed') extensionsVersion++
@@ -75,40 +86,81 @@
     dropHint = null
   }
 
-  function listIds(list: ListName, spaceId?: string): string[] {
+  function listIds(list: ListName, spaceId?: string, folderId?: string | null): string[] {
     if (!app) return []
+    if (list === 'pinned' && folderId) return app.folders[folderId]?.items ?? []
     if (list === 'favorites') return app.favorites
     const s = app.spaces.find((x) => x.id === (spaceId ?? app!.activeSpaceId))
     return s ? s[list] : []
   }
 
+  /** Folders only go in the pinned section, and never inside themselves. */
+  function canDrop(list: ListName, folderId: string | null): boolean {
+    if (!app || !dragId || !draggingFolder) return true
+    if (list !== 'pinned') return false
+    return !folderId || !folderAndDescendants(app.folders, dragId).has(folderId)
+  }
+
   /** Survol d'un onglet : on insère avant lui, ou après si la souris est dans sa moitié basse/droite. */
-  function onDragOverItem(e: DragEvent, list: ListName, id: string, horizontal = false): void {
+  function onDragOverItem(e: DragEvent, list: ListName, id: string, horizontal = false, folderId: string | null = null): void {
     if (!dragId) return
-    e.preventDefault()
     e.stopPropagation()
+    if (!canDrop(list, folderId)) return
+    e.preventDefault()
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
     const after = horizontal ? e.clientX > rect.left + rect.width / 2 : e.clientY > rect.top + rect.height / 2
-    const ids = listIds(list)
+    const ids = listIds(list, undefined, folderId)
     const index = ids.indexOf(id) + (after ? 1 : 0)
-    dropHint = { list, beforeId: ids[index] ?? null }
+    dropHint = { list, folderId, beforeId: ids[index] ?? null }
+  }
+
+  /** Over a folder row: top quarter inserts before it, the rest drops into it. */
+  function onDragOverFolder(e: DragEvent, folder: Folder, parentId: string | null): void {
+    if (!dragId) return
+    e.stopPropagation()
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+    const before = e.clientY < rect.top + rect.height / 4
+    if (before) {
+      if (!canDrop('pinned', parentId) || dragId === folder.id) return
+      e.preventDefault()
+      dropHint = { list: 'pinned', folderId: parentId, beforeId: folder.id }
+    } else {
+      if (!canDrop('pinned', folder.id)) return
+      e.preventDefault()
+      dropHint = { list: 'pinned', folderId: folder.id, beforeId: null, into: true }
+    }
   }
 
   function onDragOverList(e: DragEvent, list: ListName, spaceId?: string): void {
-    if (!dragId) return
+    if (!dragId || !canDrop(list, null)) return
     e.preventDefault()
-    if (!dropHint || dropHint.list !== list || dropHint.spaceId !== spaceId) dropHint = { list, spaceId, beforeId: null }
+    if (!dropHint || dropHint.list !== list || dropHint.spaceId !== spaceId || dropHint.folderId) {
+      dropHint = { list, spaceId, beforeId: null }
+    }
   }
 
   function onDrop(e: DragEvent): void {
     e.preventDefault()
+    e.stopPropagation()
     const id = dragId
     const hint = dropHint
+    const isFolder = draggingFolder
     onDragEnd()
     if (!id || !hint) return
-    const ids = listIds(hint.list, hint.spaceId).filter((x) => x !== id)
-    const index = hint.beforeId ? ids.indexOf(hint.beforeId) : ids.length
-    send({ type: 'move-tab', tabId: id, to: hint.list, spaceId: hint.spaceId, index: index < 0 ? ids.length : index })
+    const ids = listIds(hint.list, hint.spaceId, hint.folderId).filter((x) => x !== id)
+    let index = hint.beforeId ? ids.indexOf(hint.beforeId) : ids.length
+    if (index < 0) index = ids.length
+    if (isFolder) {
+      send({ type: 'move-folder', id, parentId: hint.folderId ?? null, spaceId: hint.spaceId, index })
+    } else {
+      const folderId = hint.folderId ?? undefined
+      send({ type: 'move-tab', tabId: id, to: hint.list, spaceId: hint.spaceId, folderId, index })
+    }
+  }
+
+  function finishFolderRename(id: string, value: string): void {
+    editingFolder = null
+    send({ type: 'rename-folder', id, name: value })
   }
 
   // ------------------------------------------------------------ Redimensionnement
@@ -177,19 +229,23 @@
   }}
 />
 
-{#snippet tabRow(tab: Tab, list: ListName)}
+{#snippet tabRow(tab: Tab, list: ListName, parentId: string | null = null, depth = 0)}
   <div
     class="tab"
     class:active={tab.id === activeId}
     class:asleep={tab.asleep}
-    class:drop-before={dropHint?.list === list && dropHint.beforeId === tab.id && dragId !== tab.id}
+    class:drop-before={dropHint?.list === list &&
+      dropHint.beforeId === tab.id &&
+      (dropHint.folderId ?? null) === parentId &&
+      dragId !== tab.id}
+    style:padding-left="{10 + depth * 14}px"
     draggable="true"
     role="button"
     tabindex="-1"
     title={tab.url}
     ondragstart={(e) => onDragStart(e, tab.id)}
     ondragend={onDragEnd}
-    ondragover={(e) => onDragOverItem(e, list, tab.id)}
+    ondragover={(e) => onDragOverItem(e, list, tab.id, false, parentId)}
     ondrop={onDrop}
     onmousedown={(e) => {
       if (e.button === 0) send({ type: 'select-tab', tabId: tab.id })
@@ -221,6 +277,65 @@
       onclick={() => send({ type: 'close-tab', tabId: tab.id })}><Icon name="close" size={13} /></button
     >
   </div>
+{/snippet}
+
+{#snippet pinnedItems(ids: string[], parentId: string | null, depth: number)}
+  {#each ids as id (id)}
+    {#if app?.folders[id]}
+      {@render folderRow(app.folders[id], parentId, depth)}
+    {:else if app?.tabs[id]}
+      {@render tabRow(app.tabs[id], 'pinned', parentId, depth)}
+    {/if}
+  {/each}
+{/snippet}
+
+{#snippet folderRow(folder: Folder, parentId: string | null, depth: number)}
+  <div
+    class="tab folder"
+    class:drop-before={dropHint?.list === 'pinned' &&
+      !dropHint.into &&
+      dropHint.beforeId === folder.id &&
+      (dropHint.folderId ?? null) === parentId}
+    class:drop-into={dropHint?.into && dropHint.folderId === folder.id}
+    style:padding-left="{10 + depth * 14}px"
+    draggable={editingFolder !== folder.id}
+    role="button"
+    tabindex="-1"
+    ondragstart={(e) => onDragStart(e, folder.id)}
+    ondragend={onDragEnd}
+    ondragover={(e) => onDragOverFolder(e, folder, parentId)}
+    ondrop={onDrop}
+    onclick={() => editingFolder !== folder.id && send({ type: 'toggle-folder', id: folder.id })}
+    onkeydown={() => {}}
+    oncontextmenu={(e) => {
+      e.preventDefault()
+      send({ type: 'folder-menu', id: folder.id })
+    }}
+  >
+    <span class="chevron" class:open={folder.open}><Icon name="chevron" size={12} /></span>
+    <span class="icon"><Icon name="folder" size={15} /></span>
+    {#if editingFolder === folder.id}
+      <input
+        class="folder-name"
+        value={folder.name}
+        use:focusSelect
+        onclick={(e) => e.stopPropagation()}
+        onblur={(e) => finishFolderRename(folder.id, e.currentTarget.value)}
+        onkeydown={(e) => {
+          if (e.key === 'Enter') e.currentTarget.blur()
+          if (e.key === 'Escape') editingFolder = null
+        }}
+      />
+    {:else}
+      <span class="label" ondblclick={(e) => { e.stopPropagation(); editingFolder = folder.id }} role="textbox" tabindex="-1">{folder.name}</span>
+    {/if}
+  </div>
+  {#if folder.open}
+    {@render pinnedItems(folder.items, folder.id, depth + 1)}
+    {#if folder.items.length === 0}
+      <div class="hint folder-empty" style:padding-left="{24 + (depth + 1) * 14}px">Dossier vide</div>
+    {/if}
+  {/if}
 {/snippet}
 
 {#if app && space && settings}
@@ -316,6 +431,7 @@
           />
         {:else}
           <span ondblclick={() => (editingSpace = space!.id)} role="textbox" tabindex="-1">{space.name}</span>
+          <button class="title-btn" title="Nouveau dossier" onclick={() => send({ type: 'new-folder', spaceId: space!.id })}><Icon name="folder-plus" size={14} /></button>
         {/if}
       </div>
 
@@ -327,9 +443,7 @@
           ondragover={(e) => onDragOverList(e, 'pinned')}
           ondrop={onDrop}
         >
-          {#each tabsOf(space.pinned) as tab (tab.id)}
-            {@render tabRow(tab, 'pinned')}
-          {/each}
+          {@render pinnedItems(space.pinned, null, 0)}
           {#if space.pinned.length === 0}
             <div class="hint">Glissez un onglet ici pour l'épingler</div>
           {/if}
@@ -609,10 +723,69 @@
   }
 
   .space-title {
-    padding: 8px 8px 2px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    min-height: 26px;
+    padding: 8px 4px 2px 8px;
     font-weight: 600;
     color: var(--fg-muted);
     font-size: 12px;
+  }
+
+  .title-btn {
+    display: grid;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    border-radius: 5px;
+    color: var(--fg-muted);
+    opacity: 0;
+    transition: opacity 120ms ease;
+  }
+
+  .space-title:hover .title-btn {
+    opacity: 1;
+  }
+
+  .title-btn:hover {
+    background: var(--item-hover);
+    color: var(--fg);
+  }
+
+  .folder .chevron {
+    display: grid;
+    margin-right: -4px;
+    color: var(--fg-muted);
+    transition: transform 120ms ease;
+  }
+
+  .folder .chevron.open {
+    transform: rotate(90deg);
+  }
+
+  .folder .icon {
+    color: var(--fg-muted);
+  }
+
+  .folder.drop-into {
+    box-shadow: inset 0 0 0 1.5px var(--accent);
+  }
+
+  .folder-name {
+    flex: 1;
+    min-width: 0;
+    padding: 2px 4px;
+    border: 1px solid var(--accent);
+    border-radius: 4px;
+    background: var(--item-active);
+    outline: none;
+  }
+
+  .hint.folder-empty {
+    padding-top: 4px;
+    padding-bottom: 4px;
+    text-align: left;
   }
 
   .space-title input {

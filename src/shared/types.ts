@@ -29,10 +29,20 @@ export interface Space {
   /** Teinte HSL (0-360) utilisée pour la couleur de l'espace. */
   hue: number
   icon: string
+  /** Top level of the pinned section: ids of tabs and folders, in display order. */
   pinned: string[]
   today: string[]
   activeTabId: string | null
   split: Split | null
+}
+
+/** Folder of the pinned section. Can hold tabs and other folders. */
+export interface Folder {
+  id: string
+  name: string
+  open: boolean
+  /** Ids of tabs and folders, in display order. */
+  items: string[]
 }
 
 export type SidebarSide = 'left' | 'right'
@@ -48,7 +58,10 @@ export interface Settings {
 }
 
 export interface State {
+  /** Format of the saved file. Bumped when the format changes (a backup of the old file is kept). */
+  version: number
   tabs: Record<string, Tab>
+  folders: Record<string, Folder>
   spaces: Space[]
   favorites: string[]
   activeSpaceId: string
@@ -95,7 +108,20 @@ export type Action =
   | { type: 'select-space'; spaceId: string }
   | { type: 'new-space' }
   | { type: 'rename-space'; spaceId: string; name: string }
-  | { type: 'move-tab'; tabId: string; to: 'favorites' | 'pinned' | 'today'; spaceId?: string; index: number }
+  | {
+      type: 'move-tab'
+      tabId: string
+      to: 'favorites' | 'pinned' | 'today'
+      spaceId?: string
+      /** Pinned only: folder to drop into (top level of the pinned section when absent). */
+      folderId?: string
+      index: number
+    }
+  | { type: 'new-folder'; spaceId?: string; parentId?: string }
+  | { type: 'rename-folder'; id: string; name: string }
+  | { type: 'toggle-folder'; id: string }
+  | { type: 'move-folder'; id: string; parentId: string | null; spaceId?: string; index: number }
+  | { type: 'folder-menu'; id: string }
   | { type: 'set-split-ratio'; ratio: number }
   | { type: 'close-split' }
   | { type: 'clear-today' }
@@ -139,6 +165,7 @@ export type OverlayMessage =
 /** Messages ponctuels envoyés à la barre latérale. */
 export type UiEvent =
   | { type: 'edit-space-name'; spaceId: string }
+  | { type: 'edit-folder-name'; id: string }
   | { type: 'window-state'; maximized: boolean }
   | { type: 'settings'; open: boolean }
   | { type: 'extensions-changed' }
